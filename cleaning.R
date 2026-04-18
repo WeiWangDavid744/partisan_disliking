@@ -1,6 +1,5 @@
 # This script trims the data to only those relevant for the project.
 
-# load dependencies
 {
   library(tidyverse)
   library(skimr)
@@ -10,6 +9,7 @@
 }
 
 #-----
+# SKIP TO LINE 119
 # open-ended response files
 # vars included: year-specific case ID, D/R dis/like responses
 #-----
