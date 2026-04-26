@@ -33,5 +33,34 @@ The purpose of this file is to log and track our updates so we keep a record of 
 
 ## Rehan
 
+### 04-25-2026
+
+#### Thermometer outcome coding
+
+Recoded `dem_therm` and `rep_therm` (continuous, 0–97) into 5-class ordered 
+categorical outcomes for multinomial LASSO text mining models:
+
+- 1 = Highly unfavorable (0–19)
+- 2 = Unfavorable (20–39)
+- 3 = Neutral (40–59)
+- 4 = Favorable (60–79)
+- 5 = Highly favorable (80–97)
+
+Negative values (-8) recoded to NA as residual non-response codes (check for data cleaning and EDA)
+
+#### Text predictors and DTMs
+
+**Text predictors**: Open-ended responss (dem_like + dem_dislike; rep_like + rep_dislike) coded into a single column (dem_text; rep_text).These will predict the thermometer class outcomes.
+
+**Non-response handling**: ~40% of respondents did not provide open-ended responses, and are therefore retained from text mining, but can be retained for the full dataset for RQ2, and potential extension with Heckman. Binary flags (has_dem_text; has_rep_text) created for RQ2.
+
+**Text representations and DTMS:** Three representations build for each party (stem, N-gram, Skip-gram), with six DTMs total. All DTMs were filtered to retain temrs appearing in at least 1% of documents. Sparsity consistent at 97-98% across all six DTMs, which is what we would expect. 
+
+Next step is LASSO modeling (2 outcome measures x 3 text methods). I'll force in year as a fixed effect and cluster standard errors as requested. 
+
+#### Analysis rationale
+ANES feeling thermometers cluster at round numbers, which makes a continuous outcome inappropriate. Moreover, we have done text-mining for classification tasks and it makes sense to apply it in that way here. Give bands provide enough detail to distinguish animosity from favorability while keeping classes well populated. 
+
+Makes sense to use a multi-class measure since we can see how different terms may be associated with animosity / favorability, before manually coding them. 
 
 ## Ying

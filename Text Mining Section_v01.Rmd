@@ -1,0 +1,1581 @@
+---
+title: "Text Mining Sections - Fold into main report"
+authors: "David Wang, Ying Zhang, Rehan Mirza"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: '4'
+urlcolor: blue
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, results = "hide", fig.width=8, fig.height=4)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, ggplot2, tm, SnowballC, RColorBrewer, wordcloud, glmnet,coefplot,  randomForest, ranger, data.table, stringr, tidytext, NLP)
+# cache = TRUE: R chunks wouldn't be updated if data is not changed. 
+# added tidtext and NLP
+```
+\pagebreak
+
+# Deciding on negative sentiment cutoffs
+
+*[BELOW FOR INTERNAL DISCUSSION ONLY]*
+
+The feeling thermometer is a scale that makes it hard to interpret. Where exactly do we draw the line between a positive, negative or neutral cutoff? Moreover, with the text mining exercises we covered in class, we were working with binary and multiclass classification tasks / outcomes, not continuous outcomes. I therefore think it makes sense to reclassify the feeling thermometer as a binary scale. 
+
+Let's look at the distributions of our outcome variables of interest first (potentially this can be folded into EDA):
+
+
+```{r}
+data <- read_csv("data/data.csv")
+
+# Distribution of both thermometers
+summary(data$dem_therm)
+summary(data$rep_therm)
+
+table(data$dem_therm)[c("0", "10", "20", "30", "40","50", "60", "70", "80", "90" , "100")]
+table(data$rep_therm)[c("0", "10", "20", "30", "40","50", "60", "70", "80", "90" , "100")]
+
+
+# Graph - cdf
+par(mfrow = c(1,2))
+
+plot(ecdf(data$dem_therm), 
+     main = "CDF: Democrat Thermometer",
+     xlab = "Feeling (0-100)", 
+     ylab = "Cumulative Proportion",
+     col = "steelblue", lwd = 2)
+abline(v = 50, col = "red", lty = 2)
+abline(h = 0.5, col = "gray", lty = 2)
+
+plot(ecdf(data$rep_therm), 
+     main = "CDF: Republican Thermometer", 
+     xlab = "Feeling (0-100)",
+     ylab = "Cumulative Proportion",
+     col = "tomato", lwd = 2)
+abline(v = 50, col = "red", lty = 2)
+abline(h = 0.5, col = "gray", lty = 2)
+
+par(mfrow = c(1,1))
+
+
+# Frequency and percentage table for both thermometers
+therm_table <- function(var, label) {
+  vals <- c("0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "97", "100")
+  counts <- table(factor(round(var), levels = vals))
+  pct <- round(100 * counts / sum(!is.na(var)), 1)
+  data.frame(
+    Value = vals,
+    N = as.integer(counts),
+    Pct = paste0(pct, "%")
+  ) |> setNames(c("Value", paste0(label, "_N"), paste0(label, "_Pct")))
+}
+
+dem_t <- therm_table(data$dem_therm, "Dem")
+rep_t <- therm_table(data$rep_therm, "Rep")
+
+cbind(dem_t, rep_t[, -1])
+```
+Note: Check what the negative values are (e.g., -8 could be non-response). Clean data for now:
+
+```{r}
+data <- data %>%
+  mutate(
+    dem_therm = if_else(dem_therm < 0, NA, dem_therm),
+    rep_therm = if_else(rep_therm < 0, NA, rep_therm)
+  )
+```
+
+
+
+The median for both parties falls at 50. There are a significant large proportion of partisans at zero thermometer for both parties. 
+
+Overall we can see three broad clusters coming up for both parties:
+
+- 0-40: animosity toward the party (~20-30% of sample)
+- 40-60: moderate views toward the party (~30% of sample)
+- 60-100: favors the party (~15-20% of sample)
+- Perhaps the remainder are non-responses
+
+There is an interesting temporal component to understand how animosity has changed over time in the EDA.
+
+```{r}
+data <- read_csv("data/data.csv") %>%
+  mutate(
+    dem_therm = if_else(dem_therm < 0, NA, dem_therm),
+    rep_therm = if_else(rep_therm < 0, NA, rep_therm),
+    dem_therm_cat = case_when(
+      dem_therm < 20  ~ 1L,  # highly unfavorable
+      dem_therm < 40  ~ 2L,  # unfavorable
+      dem_therm < 60  ~ 3L,  # neutral
+      dem_therm < 80  ~ 4L,  # favorable
+      dem_therm >= 80 ~ 5L,  # highly favorable
+      .default = NA_integer_
+    ),
+    rep_therm_cat = case_when(
+      rep_therm < 20  ~ 1L,
+      rep_therm < 40  ~ 2L,
+      rep_therm < 60  ~ 3L,
+      rep_therm < 80  ~ 4L,
+      rep_therm >= 80 ~ 5L,
+      .default = NA_integer_
+    )
+  )
+
+prop.table(table(data$dem_therm_cat)) |> round(3)
+prop.table(table(data$rep_therm_cat)) |> round(3)
+
+```
+
+
+These bands are all are substantive - though it is interesting that when people dislike the parties, they tend to really dislike them. 
+    
+\pagebreak
+
+# Step 1: Create corpora, clean corpora and create DTMs
+
+## Create corpora
+
+We created the multiclass outcomes for the thermometer in the previous section.
+
+We now want to consolidate the free response sections:
+
+- Free text responses about Democrats: 'dem_like' and 'dem_dislike' into 'dem_text'
+
+- Free text responses about Republicans: 'rep_like' and 'rep_dislike' into 'rep_text'
+
+```{r}
+data <- data %>%
+  mutate(
+    dem_text = paste(
+      if_else(is.na(dem_like), "", dem_like),
+      if_else(is.na(dem_dislike), "", dem_dislike)
+    ),
+    rep_text = paste(
+      if_else(is.na(rep_like), "", rep_like),
+      if_else(is.na(rep_dislike), "", rep_dislike)
+    )
+  )
+
+# Quick check
+data %>% select(dem_text, rep_text) %>% head(10)
+```
+
+We then build these into the corpora:
+
+- `VCorpus()`: create Volatile Corpus
+- `inspect()`: display detailed info of a corpus
+
+```{r}
+mycorpus.dem <- VCorpus(VectorSource(data$dem_text))
+mycorpus.rep <- VCorpus(VectorSource(data$rep_text))
+
+# Inspect a few documents
+lapply(mycorpus.dem[1:5], as.character)
+lapply(mycorpus.rep[1:5], as.character)
+```
+From this we can see the dataset still includes non-respondents to these questions. We can keep them in the dataset for now, but add a new variable to flag respondnets / non-respondents, and then retain only respondents with text-responses. 
+
+```{r}
+# Flag respondents with usable text, but keep all rows in data
+data <- data %>%
+  mutate(
+    has_dem_text = trimws(dem_text) != "",
+    has_rep_text = trimws(rep_text) != ""
+  )
+
+# How many have usable text?
+table(data$has_dem_text)
+table(data$has_rep_text)
+
+# Subsets for text mining only
+data.dem.tm <- data %>% filter(has_dem_text)
+data.rep.tm <- data %>% filter(has_rep_text)
+
+cat("Dem text mining sample:", nrow(data.dem.tm), "\n")
+cat("Rep text mining sample:", nrow(data.rep.tm), "\n")
+```
+
+The large proportion of non-text respondents (~40% for each party) is substantial, validating the Heckman approach for selection effects as a potential study extension. We will rebuild the corpora without these responses:
+
+```{r}
+#Recreate corpora using only the 'text mining' data (i.e., excluding non-respondents)
+mycorpus.dem <- VCorpus(VectorSource(data.dem.tm$dem_text))
+mycorpus.rep <- VCorpus(VectorSource(data.rep.tm$rep_text))
+
+lapply(mycorpus.dem[1:5], as.character)
+lapply(mycorpus.rep[1:5], as.character)
+```
+
+## Clean corpora
+
+We will create a two different sets of cleaned corpora:
+
+- 'Stemmed corpora' - for basic stem text mining analysis  - removes punctuation
+- 'N-gram / ski-gram' corpora' - keeps punctuation. we do need to need to bother with, for instance, converting periods to the word 'PERIOD' as suggested in the lecture, because we are not really dealing with full sentences.
+
+
+```{r}
+# Cleaning steps for all corpora
+clean_corpus <- function(corpus, remove_punct = TRUE) {
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, stopwords("english"))
+  if (remove_punct) corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus
+}
+
+# Stem corpora - remove punctuation and stem
+mycorpus.dem.stem <- clean_corpus(mycorpus.dem, remove_punct = TRUE)
+mycorpus.dem.stem <- tm_map(mycorpus.dem.stem, stemDocument, lazy = TRUE)
+
+mycorpus.rep.stem <- clean_corpus(mycorpus.rep, remove_punct = TRUE)
+mycorpus.rep.stem <- tm_map(mycorpus.rep.stem, stemDocument, lazy = TRUE)
+
+#N-gram / skip-gram (keep punctuation)
+mycorpus.dem.ngram <- clean_corpus(mycorpus.dem, remove_punct = FALSE)
+mycorpus.rep.ngram <- clean_corpus(mycorpus.rep, remove_punct = FALSE)
+
+```
+
+```{r}
+
+# Check corpora
+cat("=== Dem stem corpus ===\n")
+lapply(mycorpus.dem.stem[1:5], as.character)
+
+cat("=== Rep stem corpus ===\n")
+lapply(mycorpus.rep.stem[1:5], as.character)
+```
+
+## Build DTMs
+
+We will be building six DTMs in total: two sets of Stem, N-gram, and skip-gram DTMs respectively for Republicans and Democrats.
+
+```{r}
+# Stem DTMs
+
+dtm.dem.stem <- DocumentTermMatrix(mycorpus.dem.stem) |>
+  removeSparseTerms(1 - 0.01)
+
+dtm.rep.stem <- DocumentTermMatrix(mycorpus.rep.stem) |>
+  removeSparseTerms(1 - 0.01)
+
+cat("=== Dem stem DTM ===\n"); inspect(dtm.dem.stem)
+cat("=== Rep stem DTM ===\n"); inspect(dtm.rep.stem)
+```
+
+
+```{r}
+# N-gram DTMs
+
+ngram_tokenizer <- function(x, n = 2) {
+  unlist(lapply(ngrams(words(x), 1:n), paste, collapse = "_"), use.names = FALSE)
+}
+
+dtm.dem.ngram <- DocumentTermMatrix(
+  mycorpus.dem.ngram,
+  control = list(tokenize = function(x) ngram_tokenizer(x, 2))
+) |> removeSparseTerms(1 - 0.01)
+
+dtm.rep.ngram <- DocumentTermMatrix(
+  mycorpus.rep.ngram,
+  control = list(tokenize = function(x) ngram_tokenizer(x, 2))
+) |> removeSparseTerms(1 - 0.01)
+
+cat("=== Dem n-gram DTM ===\n"); inspect(dtm.dem.ngram)
+cat("=== Rep n-gram DTM ===\n"); inspect(dtm.rep.ngram)
+```
+
+
+```{r}
+# Skip-gram DTMs - takes a few minutes to run!!
+skipgram_tokenizer <- function(x, n = 2, k = 2) {
+  toks <- words(x)
+  if (length(toks) < 2) return(character(0))
+  # tidytext expects a data frame input
+  df <- data.frame(text = paste(toks, collapse = " "), stringsAsFactors = FALSE)
+  sg <- tidytext::unnest_tokens(df, ngram, text, 
+                                 token = "skip_ngrams", 
+                                 n = n, k = k)
+  sg$ngram
+}
+
+dtm.dem.skip <- DocumentTermMatrix(
+  mycorpus.dem.ngram,
+  control = list(tokenize = function(x) skipgram_tokenizer(x, n = 2, k = 2))
+) |> removeSparseTerms(1 - 0.01)
+
+dtm.rep.skip <- DocumentTermMatrix(
+  mycorpus.rep.ngram,
+  control = list(tokenize = function(x) skipgram_tokenizer(x, n = 2, k = 2))
+) |> removeSparseTerms(1 - 0.01)
+
+cat("=== Dem skip-gram DTM ===\n"); inspect(dtm.dem.skip)
+cat("=== Rep skip-gram DTM ===\n"); inspect(dtm.rep.skip)
+```
+Run tomorrow:
+
+```{r}
+load("data/text_mining_workspace.RData")
+```
+
+
+
+
+
+## Packages used
+
+1. Text Mining Packages 
+   + [`tm`](https://cran.r-project.org/web/packages/tm/tm.pdf): a popular text mining package
+   + Note: Ingo Feinerer created text mining package `tm` in 2008 while he was a phd student at TU Vienna. Users can deploy `Hadoop` to handle large textual data.
+   - `SnowballC`: For Stemming 
+2. Word Cloud Packages
+   - `RColorBrewer`: a package for color palette
+   - `wordcloud`: a package for creating wordcloud
+3. LASSO and Random Forest packages (randomForest will be covered later.)
+   - `glmnet` 
+   - `randomForest` 
+   - `ranger`
+   - [`stringr`](https://rstudio.github.io/cheatsheets/strings.pdf): useful string package
+
+My favorite packages (Of course all come from Hadley Wickham....):
+`ggplot2`, `dplyr`, `stringr` (string manipulations), `lubridate` (handling date-time). Most of them are aggregated into `tidyverse`.
+  
+\pagebreak
+
+# LASSO for classification
+
+The regularization techniques used in regression are readily applied to classification problems. Here we will penalize the coefficients while maximizing the likelihood function or minimizing the -loglikelihood function. 
+
+For a given lambda we minimize -loglikelihood. Here is the LASSO solutions:
+ 
+$$\min_{\beta_0, \beta_1, \ldots, \beta_p} -\frac{1}{n}\log(\mathcal{Lik}) + \lambda \{ |\beta_1| + |\beta_2|, \ldots+ |\beta_p| \} $$
+   
+Similarly we obtain the solution for elastic net using the general penalty functions:
+
+$$\Big(\frac{1-\alpha}{2}\Big)\|\beta\|_2^2 + \alpha \|\beta\|_1$$
+
+**Remark:** 
+
+1) To remain consistent in both binary and continuous responses, `glmnet()` uses the following penalized least squares for a continuous response variable.
+
+$$\frac{1}{2n}RSS + \lambda \Big\{ \Big(\frac{1-\alpha}{2}\Big)||\beta||_2^2 + \alpha ||\beta||_1 \Big\}$$
+ 
+2) The properties of LASSO (and elastic-net) solutions for logistic regressions are similar to that of OLS. 
+
+3) `glmnet()` and `cv.glmnet()` are used in the logistic regression setup as well. We do need to specify `family=binomial`. Also we may choose different minimization criteria such as `Deviance`, `AUC` or `MCE`. The default setting is by `Deviance`, which means we try to minimize the CV -log likelihood function.
+
+For the remaining lecture, the first step is to do EDA as usual . Then we digitize a text into a large dimension of word frequency vectors. `glm` and `LASSO` methods will be used to build models of rating based on the reviews. Finally we report testing errors comparing different models. 
+
+**Important remarks about this lecture**:
+
++ Because of large dimension, part of the analyses are run through an even smaller data set.
+
++ The full analysis results have been done and saved. We will load the results directly for the purpose of demonstration. You may run some specific chunks to get the full results yourself but it will take some time and may crush your laptop. On the other hand once you are successful, output and save your results. Then set the chunk for analysis to `eval=F` and load the results properly.
+
++ We have also included other methods such as `Random Forest`. You may keep them as references for later uses.
+
+
+
+# Exploratory Data Analysis (EDA)
+
+## Read data
+
+Using package `data.table` to read and to manipulate data is much faster than using `read.csv()` especially when the dataset is large.
+
+```{r read data, results='hold'}
+#data.all <- read.csv("yelp_subset.csv", as.is=TRUE) # as.is = T to keep the texts as character
+data.all <- fread("data/yelp_subset.csv", stringsAsFactors = FALSE)
+dim(data.all) # 100,000 documents  # length(unique(data.all$user_id))/dim(data.all)[1] 
+object.size(data.all) # about 92mb, 1mb is about 1 million bytes
+```
+
+Let's first take a small piece of it to work through. We could use `fread` to only load `nrows` many rows to avoid loading the entire dataset. 
+```{r results= 'hold'}
+# taking a subset of yelp data
+# We could use fread with a specified nrows. We might need to shuffle the data in order to
+# get a random sample.
+data <- fread("data/yelp_subset.csv", nrows = 1000, stringsAsFactors = FALSE) # problematic???
+#data_rm <- fread("surf -n 1000 data/yelp_subset.csv", stringsAsFactors = FALSE)   
+# to get random sample. unfortunately only works in linux now.
+data <- data.all[1:1000, ] # Take a small set to work through
+        # MAKE SURE: you will rerun the analyses later by
+        # setting back a larger dataset.
+names(data)
+str(data)   
+# notice the date variable is coded as "year-month-day"
+#length(unique(data$user_id)) #someone wrote more than one reviews
+#length(unique(data$review_id)) # unique one for each review
+n <- nrow(data)
+levels(as.factor(data$stars))
+```
+
+## Response
+
+The `rating` available to us has five levels. In this particular case we can treat it as a continuous variable, or an ordinal variable or a categorical variable. If we take it as a categorical response, there will be five levels. Logistic regression or LASSO models can handle such a situation. But for simplicity in this lecture we will regroup them into a binary settings. We create a new response `rating` such that a review will be `good` or `1` if the original rating is at least 4 or 5. Otherwise we will code it as a `bad` or `0`. 
+Stars or ratings are turn to a good/bad rating. We also set `rating` as a categorical variable.   
+
+```{r}
+data$rating <- c(0)
+data$rating[data$stars >= 4] <- 1
+data$rating <- as.factor(data$rating)
+summary(data) #str(data)
+```
+
+**Proportion of good ratings**:
+
+```{r results='hold'}
+prop.table(table(data$rating))
+```
+Notice that $60\%$ of the reviews are good ones.
+
+## How to handle date
+
+**Does rating relate to month or day of the weeks?**
+
+Dealing with `date` can be a challenging job. Should we treat them as continuous variables or categorical ones? This highly depends on the context and the goal of the study. In our situation it makes sense that we are interested in knowing if people tend to leave reviews over the weekend. Also, would a review left on the weekend tends to be a better one?
+
+Let us use functions in `tidyverse` to  format the dates and extract weekdays
+```{r}
+range(as.Date(data$date)) 
+# date range in our dataset, the data is already shuffled. 
+weekdays <- weekdays(as.Date(data$date)) # get weekdays for each review  
+months <- months(as.Date(data$date))   # get months 
+```
+
+Do people tend to leave a review over weekends? (months?)
+```{r results='hold'}
+par(mfrow=c(1,2))
+pie(table(weekdays), main="Prop of reviews") # Pretty much evenly distributed
+pie(table(months))  
+```
+
+Proportion of Good reviews: Don't really see any pattern
+```{r results='hold'}
+prop.table(table(data$rating, weekdays), 2)  # prop of the columns
+prop.table(table(data$rating, weekdays), 1)  # prop of the rows
+```
+\pagebreak
+
+# Bag of words and term frequency
+
+How should we use a review as predictors? Obviously, some sentences are informative. Also, words used to provide information, as well as sentiments, will show how people feel as well. We will turn a text into a vector of features, each of which represents the words that are used. The specific value of the feature for a given document tells us the frequency (how many occurrences) of that word in the document. 
+
+We do this by first collect all possible words (referred to as a library or bag of all words). We will then record frequency of each word used in the review/text. 
+
+It is clear by doing so we get simple interpretations of each word on rating. But we ignore
+
+  - context aware of each word
+  - word orders
+
+We will later expand the models to 
+  - Document embedding
+  - Neural Networks in addition to glm
+
+## Word term frequency table using `tm`
+
+Use word term frequency table to transform texts into word frequencies matrix.
+
+ - First form a `bag of words`: all the words appeared in the documents say `N` (in general, very large)
+ - For each document (row), record the frequency (count) of each word in the bag which gives us `N` values (notice: most of the entries are 0, as most words will *not* occur in every document)
+ - Output the **document term matrix** (`dtm`) as an input to a later model
+ 
+The following plots illustrate the corresponding relationship between a review and the word frequencies matrix:  
+ 
+![](data/comments_to_matrix.jpg)
+
+Let's first take a look at the texts we have: 
+```{r}
+data1.text <- data$text   # take the text out summary(data)
+length(data1.text)
+typeof(data1.text)
+
+print(data1.text[1:5]) # view a few documents
+```
+Notice number 4 and 5 are bit lengthy, which could indicate they like the place. Metadata, such as the number of words (or number of characters, amount of punctuation etc.) could be a good predictor when doing text mining. We will investigate it later. We now extract text into word term frequency table.
+
+### Corpus: a collection of text
+
+- `VCorpus()`: create Volatile Corpus
+- `inspect()`: display detailed info of a corpus
+
+```{r results='hold'}
+mycorpus1 <- VCorpus(VectorSource(data1.text))
+mycorpus1  
+typeof(mycorpus1)   ## It is a list
+# inspect the first corpus
+inspect(mycorpus1[[1]])
+# or use `as.character` to extract the text
+as.character(mycorpus1[[1]])
+```
+
+Inspect the corpus, say documents number 4 and 5.
+```{r}
+## inspect corpus 4
+# as.character(mycorpus1[4]) 
+## make it more manageable to read
+# strwrap(as.character(mycorpus1[4])) 
+lapply(mycorpus1[4:5], as.character)  # inspect corpus 4:5
+# lapply(mycorpus1[4:5], inspect)  # inspect corpus 4:5
+```
+
+
+### Data cleaning using `tm_map()`
+
+Before transforming the text into a word frequency matrix, we should transform the text into a more standard format and clean the text by removing punctuation, numbers and some common words that do not have predictive power (a.k.a. [stopwords](https://kavita-ganesan.com/what-are-stop-words/#:~:text=Stop%20words%20are%20a%20set,on%20the%20important%20words%20instead); e.g. pronouns, prepositions, conjunctions). This can be tedious but is necessary for quality analyses. We use the `tm_map()` function with different available transformations including `removeNumbers()`, `removePunctuation()`, `removeWords()`, `stemDocument()`, and `stripWhitespace()`. It works like the `apply()` class function to apply the function to corpus. Details of each step are in the appendix. These cleaning techniques are not one-size-fits-all, and the techniques appropriate for your data will vary based on context. 
+
+```{r results=TRUE}
+# Converts all words to lowercase
+mycorpus_clean <- tm_map(mycorpus1, content_transformer(tolower))
+
+# Removes common English stopwords (e.g. "with", "i")
+mycorpus_clean <- tm_map(mycorpus_clean, removeWords, stopwords("english"))
+
+# Removes any punctuation
+# NOTE: This step may not be appropriate if you want to account for differences
+#       on semantics depending on which sentence a word belongs to if you end up
+#       using n-grams or k-skip-n-grams.
+#       Instead, periods (or semicolons, etc.) can be replaced with a unique
+#       token (e.g. "[PERIOD]") that retains this semantic meaning.
+mycorpus_clean <- tm_map(mycorpus_clean, removePunctuation)
+
+# Removes numbers
+mycorpus_clean <- tm_map(mycorpus_clean, removeNumbers)
+
+# Stem words
+mycorpus_clean <- tm_map(mycorpus_clean, stemDocument, lazy = TRUE)   
+
+lapply(mycorpus_clean[4:5], as.character)
+```
+
+
+
+### Word frequency matrix
+
+Now we transform each review into a word frequency matrix using the function `DocumentTermMatrix()`. 
+
+```{r results=TRUE}
+dtm1 <- DocumentTermMatrix( mycorpus_clean )   ## library = collection of words for all documents
+class(dtm1)
+inspect(dtm1) # typeof(dtm1)  #length(dimnames(dtm1)$Terms)
+```
+
+Take a look at the dtm.
+```{r}
+colnames(dtm1)[7150:7161] # the last a few words in the bag
+# another way to get list of words
+# colnames(dtm1)[1:20]
+# dimnames(dtm1)$Terms[7000:7161]
+dim(as.matrix(dtm1))  # we use 7161 words as predictors
+```
+
+Document 1, which is row1 in the dtm.
+```{r}
+inspect(dtm1[1,])  #Non-/sparse entries: number of non-zero entries vs. number of zero entries
+``` 
+It has 25 distinctive words; in other words, there 25 non-zero cells out of 7161 bag of words.
+```{r}
+as.matrix(dtm1[1, 1:50])  # most of the cells are 0
+``` 
+This is because review 1 only consists of 28 words after all the cleansing.
+```{r}
+sum(as.matrix(dtm1[1,]))
+``` 
+We may
+```{r}
+colnames(as.matrix(dtm1[1, ]))[which(as.matrix(dtm1[1, ]) != 0)]
+```
+```{r}
+as.character(mycorpus1[[1]]) #original text
+```
+
+We inspect a few rows and columns of `dtm1`.
+```{r}
+inspect(dtm1[1:5, 1000:1010]) # very sparse
+```
+
+### Reduce the size of the bag
+
+Many words do not appear nearly as often as others. If your cleaning was done appropriately, it will hopefully not lose much of the information if we drop such rare words. So, we first cut the bag to only include the words appearing at least 1% (or the frequency of your choice) of the time. This reduces the dimension of the features extracted to be analyzed. 
+```{r}
+threshold <- .01*length(mycorpus_clean)   # 1% of the total documents 
+words.10 <- findFreqTerms(dtm1, lowfreq=threshold)  # words appearing at least among 1% of the documents
+length(words.10)
+words.10[580:600]
+```
+
+
+```{r}
+dtm.10<- DocumentTermMatrix(mycorpus_clean, control = list(dictionary = words.10))  
+dim(as.matrix(dtm.10))
+colnames(dtm.10)[40:50]
+```
+
+**`removeSparseTerms()`**:
+
+Anther way to reduce the size of the bag is to use `removeSparseTerms`
+```{r}
+dtm.10.2 <- removeSparseTerms(dtm1, 1-.01)  # keep words appears in at least 1% of the total documents
+inspect(dtm.10.2)
+# colnames(dtm.10.2)[1:50]
+# words that are in dtm.10 but not in dtm.10.2
+colnames(dtm.10)[!(colnames(dtm.10) %in% colnames(dtm.10.2))]
+
+```
+
+We end up with two different bags because
+
+- `findFreqTerms()`: counts a word multiple times if it appears multiple times in one document.  
+- `removeSparseTerms(   1-X)`: keep words that appear at least  X% of documents.  
+
+
+# One step to get `DTM`
+
+We consolidate all possible processing steps to the following clean `R-chunk`, turning texts (input) into `Document Term Frequency` which is a sparse matrix (output) to be used in the down-stream analyses. 
+
+All the `tm_map()` can be called inside `DocumentTermMatrix` under parameter called `control`. Here is how. 
+
+```{r DTM, results= TRUE}
+# Turn texts to corpus
+data1.text <- data$text # get all the texts
+mycorpus1  <- VCorpus(VectorSource(data1.text)) # prep for tm
+# Before cleaning up.
+dtm.temp <- DocumentTermMatrix(mycorpus1)
+inspect(dtm.temp) # check the dtm before processing: 16750 terms
+# Control list for creating our DTM within DocumentTermMatrix
+# Can tweak settings based off if you want punctuation, numbers, etc.
+control_list <- list( tolower = TRUE, 
+                      removePunctuation = TRUE,
+                      removeNumbers = TRUE, 
+                      stopwords = stopwords("english"), 
+                      stemming = TRUE)
+# dtm with all terms:
+dtm.10.long  <- DocumentTermMatrix(mycorpus1, control = control_list)
+inspect(dtm.10.long) # check the dtm with all the terms: 7441 terms
+
+# kick out rare words 
+dtm.10<- removeSparseTerms(dtm.10.long, 1-.01)  # keep words appears in at least 1% of the total documents
+inspect(dtm.10)  # 950 words left. 
+
+# Non-/sparse entries (non-zeros/zeros)
+# look at the document 1 before and after cleaning
+# inspect(mycorpus1[[1]])
+# after cleaning
+# colnames(as.matrix(dtm.10[1, ]))[which(as.matrix(dtm.10[1, ]) != 0)]
+```
+
+
+# N-grams and other extensions (skip this section)
+
+We have included n-grams here as a reference. We also implemented how to get the DTM. But will skip this section. 
+
+## What about word order?
+
+The approach we have taken with bag of words may seem very naive. What we have done is essentially looked at the frequencies of word occurrences in each document while throwing out any of the grammatical structure related to word ordering, punctuation, etc.
+
+Consider the following two sentences:
+
+* "This restaurant is the worst, I can't stand the service here..."
+* "I can't stand the worst service at other restaurants around here, but this place is an exception..."
+
+When we read these, we realize that the *ordering* of the words plays an important role in the meaning. While both sentences might be treated similarly by bag-of-words, each having one occurrence of the word "worst", we know by the surrounding context that the first review is negative while the other is positive.
+
+Fortunately, there are extensions to bag-of-words that let us account for these nuances related to word ordering and related semantics! Instead of looking at the frequencies of individual words, what if we look at the frequencies of pairs, triples, or even n consecutive words? [N-grams](https://en.wikipedia.org/wiki/N-gram#Skip-gram) do exactly this, typically looking at the number of occurrences of all n-tuples of consecutive words from all of our documents of interest. There are even further generalizations like [skip-grams](https://en.wikipedia.org/wiki/N-gram#Skip-gram) that let us look at consecutive sequences of words with some gaps in the middle, but this is beyond anything that you will be required to do in the class (though it could be interesting to try for your final project!).
+
+While this gives the added benefit of capturing more nuances in the language, you can probably imagine that this would blow up our feature space really quickly, so in practice most people don't go beyond bi- or tri-grams. Like we had in the case of bag-of-words, most of our n-grams are also going to be pretty rare, especially for higher values of n, so we should keep in mind that our feature matrix is going to be even more sparse than before.
+
+An example of bigrams on the sentence "I love data science" is "I love", "love data", and "data science". Generally, we also compute the 1-grams as well, which coincide with the bag-of-words from before.
+
+## N-grams in R 
+
+ Using the `tm` package along with a custom tokenizer, we can now implement n-grams using R! As is, the tokenizer is set to produce bugrams but you should be able to change this by tweaking the variable `n`.
+
+```{r n-gram tokenizer}
+# The 'n' for n-grams
+# n=2 is bi-grams
+n <- 2
+
+# Our custom tokenizer
+# Uses the ngrams function from the NLP package
+# Right now this is for bigrams, but you can change it by changing the value of
+# the variable n (includes N-grams for any N <= n)
+ngram_tokenizer <- function(x, n) {
+  unlist(lapply(ngrams(words(x), 1:n), paste, collapse = "_"), use.names = FALSE)
+}
+```
+
+
+We next prepare a clean corpus
+```{r}
+# Converts all words to lowercase
+mycorpus1  <- VCorpus(VectorSource(data1.text))
+mycorpus_clean <- tm_map(mycorpus1, content_transformer(tolower))
+
+# Removes common English stopwords (e.g. "with", "i")
+mycorpus_clean <- tm_map(mycorpus_clean, removeWords, stopwords("english"))
+
+# Removes any punctuation
+# NOTE: This step may not be appropriate if you want to account for differences
+#       on semantics depending on which sentence a word belongs to if you end up
+#       using n-grams or k-skip-n-grams.
+#       Instead, periods (or semicolons, etc.) can be replaced with a unique
+#       token (e.g. "[PERIOD]") that retains this semantic meaning.
+mycorpus_clean <- tm_map(mycorpus_clean, removePunctuation)
+
+# Removes numbers
+mycorpus_clean <- tm_map(mycorpus_clean, removeNumbers)
+
+# Stem words
+mycorpus_clean <- tm_map(mycorpus_clean, stemDocument, lazy = TRUE)   
+```
+
+
+
+
+Apply the bigram tokenizer to the first review, we see the library or word of bag is enlarged.
+```{r results='hold'}
+inspect(mycorpus_clean[[1]])  # see review 1 again
+ngram_tokenizer(mycorpus_clean[[1]], 2) # output bigram of review 1
+```
+
+While we won't run any analyses with the n-grams, we encourage you to play around with some of the settings to see how the DTM changes, as well as how the analysis might be improved (or worsened) by including the higher order n-grams.
+
+```{r n-gram DTM, results=TRUE}
+# use ngram_tokenizer()
+control_list_ngram <- list(tokenize = function(x) ngram_tokenizer(x, 2))
+
+dtm_ngram <- DocumentTermMatrix(mycorpus_clean, control_list_ngram)
+# kick out rare words 
+dtm_ngram.10 <- removeSparseTerms(dtm_ngram, 1-.01)  
+inspect(dtm_ngram.10)
+
+```
+
+Note how much larger the DTM is once we've included bigrams... Can you think of a way to clear out some of the more rare bigrams without getting rid of all of them?
+
+# Analyses
+
+Once we have turned a text into a vector, we can then apply any methods suitable for the settings. In our case we will use logistic regression models and LASSO to explore the relationship between `ratings` and `text`. 
+
+
+## Data preparation
+The following chunk output a data frame called data2, combining "user_id", "stars", "date", "rating" and all the tf's of each word.
+
+```{r }
+names(data)
+# Combine the original data with the text matrix
+data1.temp <- data.frame(data,as.matrix(dtm.10) )   # original data + word freq
+dim(data1.temp)
+names(data1.temp)[1:30]
+#str(data1.temp)
+# data2 consists of date, rating and all the top 1% words
+data2 <- data1.temp[, c(1,7, 8,11, 14:ncol(data1.temp))]
+names(data2)[1:20]
+dim(data2)  ### remember we have only run 1000 rows
+
+#### We have previously run the entire 100,000 rows and output the DTM out. 
+### if not, run and write as csv
+if(!file.exists("data/YELP_tm_freq.csv")) {
+  fwrite(data2, "data/YELP_tm_freq.csv", row.names = FALSE)
+}
+```
+
+ABOVE code is used for the purpose of demonstration with only 1000 documents. We have processed the entire data set into a word frequency matrix and written out all 100,000 documents into "YELP_tm_freq.csv".
+
+## Splitting data
+
+Let's first read in the processed data with text being a vector. 
+```{r}
+data2 <- fread("data/YELP_tm_freq.csv")  #dim(data2)
+names(data2)[1:20] # notice that user_id, stars and date are in the data2
+dim(data2)
+data2$rating <- as.factor(data2$rating)
+table(data2$rating)
+#str(data2)  object.size(data2)  435Mb!!!
+```
+
+As one standard machine learning process, we first split data into two sets one training data and the other testing data. We use training data to build models, choose models etc and make final recommendations. We then report the performance using the testing data.
+
+Reserve 10000 randomly chosen rows as our test data (`data2.test`) and the remaining 90000 as the training data (`data2.train`)
+```{r}
+set.seed(1)  # for the purpose of reproducibility
+n <- nrow(data2)
+test.index <- sample(n, 10000)
+# length(test.index)
+data2.test <- data2[test.index, -c(1:3)] # only keep rating and the texts
+data2.train <- data2[-test.index, -c(1:3)]
+dim(data2.train)
+```
+
+## Analysis 1: LASSO
+
+We first explore a logistic regression model using LASSO. The following R-chunk runs a LASSO model with $\alpha=.99$. The reason we take an elastic net is to enjoy the nice properties from both `LASSO` (impose sparsity) and `Ridge` (computationally stable). 
+
+LASSO takes sparse design matrix as an input. So make sure to extract the sparse matrix first as the input in cv.glm(). It takes about 1 minute to run cv.glm() with sparse matrix or 11 minutes using the regular design matrix. 
+
+
+```{r, eval=FALSE}
+### or try `sparse.model.matrix()` which is much faster
+str(data2.train)
+y <- data2.train$rating
+X1 <- sparse.model.matrix(rating~., data=data2.train)[, -1]
+set.seed(2)
+result.lasso <- cv.glmnet(X1, y, alpha=.99, family="binomial")
+# 40 seconds in my MAC
+plot(result.lasso)
+# this this may take you long time to run, we save result.lasso
+saveRDS(result.lasso, file="data/TextMining_lasso.RDS")
+# result.lasso can be assigned back by 
+# result.lasso <- readRDS("data/TextMining_lasso.RDS")
+
+# number of non-zero words picked up by LASSO when using lambda.1se
+
+# option 1 
+coef.1se <- extract.coef(result.lasso, lambda = result.lasso$lambda.1se)# LASSO equations
+# extract the nonzero features
+lasso.words <- rownames(coef.1se)[-1]
+# summary(lasso.words) # 751
+
+
+# option 2
+coef.1se <- coef(result.lasso, s="lambda.1se")  
+lasso.words <- coef.1se@Dimnames[[1]] [coef.1se@i][-1] # non-zero variables without intercept. 
+# summary(lasso.words)
+
+
+# opetion 3:or our old way
+coef.1se <- coef(result.lasso, s="lambda.1se")  
+coef.1se <- coef.1se[which(coef.1se !=0),] 
+lasso.words <- rownames(as.matrix(coef.1se))[-1]
+# summary(lasso.words)
+
+
+
+### cv.glmnt with the non-sparse design matrix takes much longer
+# X <- as.matrix(data2.train[, -1]) # we can use as.matrix directly her
+#### Be careful to run the following LASSO.
+#set.seed(2)
+#result.lasso <- cv.glmnet(X, y, alpha=.99, family="binomial")  
+# 10 minutes in my MAC
+#plot(result.lasso)
+
+
+```
+
+Try to kick out some not useful words (Warning: this may crash your laptop!!!) Because of the computational burden, I have saved the LASSO results and other results into `TextMining_lasso.RDS` and  `TextMining_glm.RDS`.
+
+
+We resume our analyses by loading the `LASSO` results here. We extract useful variables using `lambda.1se`
+
+
+```{r results=TRUE}
+result.lasso <- readRDS("data/TextMining_lasso.RDS")
+plot(result.lasso)
+coef.1se <- coef(result.lasso, s="lambda.1se")  
+coef.1se <- coef.1se[which(coef.1se !=0),] 
+lasso.words <- rownames(as.matrix(coef.1se))[-1]
+summary(lasso.words)
+
+```
+
+## Analysis 2: Relaxed LASSO 
+
+As an alternative model we will run our relaxed `LASSO`. Input variables are chosen by `LASSO` and we get a regular logistic regression model. Once again it is stored as `result.glm` in `TextMining.RData`. 
+
+```{r relax lasso, eval=F}
+sel_cols <- c("rating", lasso.words)
+# use all_of() to specify we would like to select variables in sel_cols
+data_sub <- data2.train %>% select(all_of(sel_cols)) #dim(data_sub)
+result.glm <- glm(rating~., family=binomial, data_sub) # takes 3.5 minutes
+## glm() returns a big object with unnecessary information
+# saveRDS(result.glm, 
+#      file = "data/TextMining_glm.RDS")
+
+## trim the glm() fat from 
+## https://win-vector.com/2014/05/30/trimming-the-fat-from-glm-models-in-r/
+stripGlmLR <- function(cm) {
+  cm$y = c()
+  cm$model = c()
+  
+  cm$residuals = c()
+  cm$fitted.values = c()
+  cm$effects = c()
+  cm$qr$qr = c()  
+  cm$linear.predictors = c()
+  cm$weights = c()
+  cm$prior.weights = c()
+  cm$data = c()
+
+  
+  cm$family$variance = c()
+  cm$family$dev.resids = c()
+  cm$family$aic = c()
+  cm$family$validmu = c()
+  cm$family$simulate = c()
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  
+  cm
+}
+
+result.glm.small <- stripGlmLR(result.glm)
+
+saveRDS(result.glm.small, 
+     file = "data/TextMining_glm_small.RDS")
+```
+
+## Analysis 3: Word cloud! (Sentiment analysis)
+
+Logistic regression model connects the chance of `being good` given a text/review. What are the `nice` (or positive) words and how much it influence the chance being good? In addition to explore the set of good words we also build word clouds to visualize the correlation between positive words and negative words.
+
+1. Order the glm positive coefficients (positive words). Show them in a word cloud. The size of the words indicates the strength of positive correlation between that word and the chance being a good rating.
+
+2. Order the glm negative coefficients (negative words)
+
+TIME TO PLOT A WORD CLOUD!! Plot the world clouds, the size of the words are prop to the logistic reg coef's
+
+**Positive word cloud**:
+
+```{r, warning=FALSE}
+result.glm <- readRDS("data/TextMining_glm_small.RDS")
+result.glm.coef <- coef(result.glm) #length(result.glm.coef)
+result.glm.coef[200:250]
+hist(result.glm.coef)
+
+# pick up the positive coef's which are positively related to the prob of being a good review
+good.glm <- result.glm.coef[which(result.glm.coef > 0)]
+good.glm <- good.glm[-1]  # took intercept out
+names(good.glm)[1:20]  # which words are positively associated with good ratings
+
+good.fre <- sort(good.glm, decreasing = TRUE) # sort the coef's
+good.fre < round(good.fre, 3)
+length(good.fre)  # 390 good words
+temp <- as.data.frame(good.fre)
+
+
+# hist(as.matrix(good.fre), breaks=30, col="red") 
+good.word <- names(good.fre)  # good words with a decreasing order in the coeff's
+
+```
+
+The above chunk shows in detail about the weight for positive words. We only show the positive word-cloud here. One can tell the large positive words are making sense in the way we do expect the collection of large words should have a positive tone towards the restaurant being reviewed. 
+```{r results=TRUE, warning=FALSE, message=FALSE}
+cor.special <- brewer.pal(8,"Dark2")  # set up a pretty color scheme
+wordcloud(good.word[1:300], good.fre[1:300],  # make a word cloud
+          colors=cor.special, ordered.colors=F)
+```
+
+**Concern:** Many words got trimmed due to stemming? We may redo dtm without stemming? 
+
+
+**Negative word cloud**:
+
+Similarly to the negative coef's which is positively correlated to the prob. of being a bad review
+```{r, message=FALSE, warning=FALSE, results= TRUE}
+bad.glm <- result.glm.coef[which(result.glm.coef < 0)]
+# names(bad.glm)[1:50]
+
+cor.special <- brewer.pal(6,"Dark2")
+bad.fre <- sort(-bad.glm, decreasing = TRUE)
+round(bad.fre, 4)[1:40]
+
+# hist(as.matrix(bad.fre), breaks=30, col="green")
+bad.word <- names(bad.fre)
+wordcloud(bad.word[1:300], bad.fre[1:300], 
+          color=cor.special, ordered.colors=F)
+```
+
+**Put two clouds together**:
+
+```{r, message=FALSE, warning=FALSE, results= TRUE}
+par(mfrow=c(1,2))
+cor.special <- brewer.pal(8,"Dark2") 
+wordcloud(good.word[1:300], good.fre[1:300], 
+          colors=cor.special, ordered.colors=F)
+wordcloud(bad.word[1:300], bad.fre[1:300], 
+          color="darkgreen", ordered.colors=F)
+par(mfrow=c(1,1))
+```
+
+## Analysis 4: Predictions
+
+We have obtained two sets of models one from `LASSO` the other from `relaxed LASSO`. To compare the performance as classifiers we will evaluate their `mis-classification error` and/or `ROC` curves using `testing data`.
+
+### 1) How does glm do in terms of classification?
+
+Use the testing data we get mis-classification errors for one rule: majority vote. 
+```{r results= 'hold'}
+predict.glm <- predict(result.glm, data2.test, type = "response")
+class.glm <- ifelse(predict.glm > .5, "1", "0")
+# length(class.glm)
+
+testerror.glm <- mean(data2.test$rating != class.glm)
+testerror.glm   # mis classification error is 0.19
+
+pROC::roc(data2.test$rating, predict.glm, plot=T) # AUC=.87!!!!
+```
+
+
+### 2) LASSO model using `lambda.1se`
+
+Once again we evaluate the testing performance of `LASSO` solution. 
+```{r results= 'hold'}
+predict.lasso.p <- predict(result.lasso, as.matrix(data2.test[, -1]), type = "response", s="lambda.1se")
+  # output lasso estimates of prob's
+predict.lasso <- predict(result.lasso, as.matrix(data2.test[, -1]), type = "class", s="lambda.1se")
+  # output majority vote labels
+
+# LASSO testing errors
+mean(data2.test$rating != predict.lasso)   # .19
+
+# ROC curve for LASSO estimates
+
+pROC::roc(data2.test$rating, predict.lasso.p, plot=TRUE)
+
+```
+
+Comparing the two predictions through testing errors/ROC we do not see much of the difference. We could use either final models for the purpose of the prediction. 
+
+
+# Conclusion
+
+In this lecture, we apply LASSO to classify good/bad review based on the text. The core technique for text mining is a simple bag of words, i.e. a word frequency matrix. The problem becomes a high-dimensional problem. Using LASSO, we reduce dimension and train a model with high predictive power. Based on the model, we find out the positive/negative words and build a word cloud.
+
+One natural question to ask about `bag of words` is to take certain weight for each word or a document length. There are some attempts to make adjustment. One way is called `TF-IDF`. We have tried this and it did not really help in reducing the errors. We left it in the Appendices. 
+
+There are many other models we can build. For example `trees` through `Random Forest` or `boosting` . We could also try to transform the features by `PCA` first then apply the methods mentioned here. We could also apply deep learning techniques to expand logistic regression models. Some methods are implemented and we have left these analyses into the Appendices as reference for you. 
+
+# Exercise
+
+Please reproduce the analyses:
+
+1) Take a random sample of 20,000 reviewers.
+
+2) Get dtm with your own specifications. Try not to stem words
+
+3) Get LASSO, then glm then word clouds.
+
+4) Report testing data performance with comparison of LASSO and glm result. 
+
+5) Write a brief summary.
+
+```{r Exercise chunk, warning=F}
+# 1. randomly sample 20,000 reviewers
+set.seed(5710)
+reviewer_ids <- sample(unique(data.all$user_id), size = 20000)
+data_20k <- data.all %>% filter(user_id %in% reviewer_ids)
+
+# 2. dtm
+## turn text to corpus
+data_20k_text <- data_20k$text
+corpus_20k <- VCorpus(VectorSource(data_20k_text))
+
+## check raw dtm
+dtm_20k_raw <- DocumentTermMatrix(corpus_20k)
+inspect(dtm_20k_raw) # 152899 terms
+
+## construct control list (no word stemming)
+control_list_20k <- list(tolower=T,
+                         removePunctuation=T,
+                         removeNumbers=T, 
+                         stopwords=stopwords('en'))
+
+## dtm with control list
+dtm_20k <- DocumentTermMatrix(corpus_20k, control=control_list_20k)
+inspect(dtm_20k) # 70191 terms now
+
+## exclude rare words (<1% of documents)
+dtm_20k_cln <- removeSparseTerms(dtm_20k, 1-0.01)
+inspect(dtm_20k_cln) # 1011 terms now
+
+## glance at 1st document before and after cleaning
+inspect(corpus_20k[[1]])
+colnames(as.matrix(dtm_20k_cln[1, ]))[which(as.matrix(dtm_20k_cln[1, ]) != 0)]
+
+# 3. LASSO
+## data prep
+### construct binary ratings variable
+data_20k_rate <- data_20k %>%
+  mutate(rating = as.factor(ifelse(stars >= 4, 1, 0)))
+
+### reserve only useful columns
+data_20k_select <- data_20k_rate %>%
+  select(user_id, stars, date, rating)
+
+### merge with word frequency data
+data_20k_lasso <- data.frame(data_20k_select, as.matrix(dtm_20k_cln))
+
+### build testing and training data
+n_20k <- nrow(data_20k_lasso)
+idx_20k_test <- sample(n_20k, round(n_20k/10))
+data_20k_test <- data_20k_lasso[idx_20k_test,] %>%
+  select(-user_id, -stars, -date)
+data_20k_train <- data_20k_lasso[-idx_20k_test,] %>%
+  select(-user_id, -stars, -date)
+
+## Step a) LASSO derives the predictive words
+### sparse model matrix as input for cv.glmnet(); drop intercept to avoid duplication
+model_matrix_20k <- sparse.model.matrix(rating ~ ., data = data_20k_train)[, -1]
+dv_20k <- data_20k_train$rating
+### alpha = .99 -- elastic net to balance sparcity (LASSO) and computational stability 
+### (Ridge) assuming there might be multicollinearity
+lasso_20k <- cv.glmnet(x = model_matrix_20k, y = dv_20k, alpha=.99, family='binomial')
+plot(lasso_20k)
+
+coef_1se_lasso_20k <- extract.coef(lasso_20k, lambda = lasso_20k$lambda.1se)
+words_lasso_20k <- rownames(coef_1se_lasso_20k)[-1]
+summary(words_lasso_20k) # only 537 words retained as predictive after LASSO
+
+## Step b) Relaxed LASSO: build logit using glm() and derive coefficients
+data_20k_lassosel <- data_20k_train %>% select(all_of(words_lasso_20k), rating)
+glm_20k <- glm(rating ~ ., family = binomial, data = data_20k_lassosel)
+### glm object has lots of useless info (419MB): trim
+### https://win-vector.com/2014/05/30/trimming-the-fat-from-glm-models-in-r/
+stripGlmLR <- function(cm) {
+  cm$y = c()
+  cm$model = c()
+  
+  cm$residuals = c()
+  cm$fitted.values = c()
+  cm$effects = c()
+  cm$qr$qr = c()  
+  cm$linear.predictors = c()
+  cm$weights = c()
+  cm$prior.weights = c()
+  cm$data = c()
+
+  
+  cm$family$variance = c()
+  cm$family$dev.resids = c()
+  cm$family$aic = c()
+  cm$family$validmu = c()
+  cm$family$simulate = c()
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  
+  cm
+}
+glm_20k_small <- stripGlmLR(glm_20k) # only 4MB now
+
+## Step c) Word Cloud
+### view histogram of relaxed LASSO coefficients
+coef_relaxed_lasso_20k <- coef(glm_20k_small)[-1] #take out intercept
+hist(coef_relaxed_lasso_20k)
+
+### extract positively predictive words and frequencies
+pos_freq_20k <- coef_relaxed_lasso_20k[which(coef_relaxed_lasso_20k >0)] %>%
+  sort(decreasing = T) %>%
+  round(3)
+pos_words_20k <- names(pos_freq_20k)
+
+### plot word cloud for positive words
+wordcloud(pos_words_20k, pos_freq_20k, colors = brewer.pal(8, 'Dark2'), ordered.colors = F)
+
+### repeat for negatively predicted words
+neg_freq_20k <- coef_relaxed_lasso_20k[which(coef_relaxed_lasso_20k < 0)] %>%
+  sort(decreasing = F) %>%
+  round(3)
+neg_words_20k <- names(neg_freq_20k)
+#### use -neg_freq_20k so the frequencies are all positive
+wordcloud(neg_words_20k, -neg_freq_20k, colors = brewer.pal(6, 'Dark2'), ordered.colors = F)
+
+## Step d) Compare LASSO vs. Relaxed LASSO coefficients' predictiveness
+### Relaxed LASSO
+predict_glm_20k <- predict(glm_20k, data_20k_test, type = 'response')
+class_glm_20k <- ifelse(predict_glm_20k > 0.5, 1, 0) #set threshold at 0.5
+mce_glm_20k <- mean(data_20k_test$rating != class_glm_20k)
+mce_glm_20k # misclassification error (MCE) = 0.1768527
+pROC::roc(data_20k_test$rating, predict_glm_20k, plot=T) # AUC = 0.8799
+
+### LASSO
+#### unlike glm, cv.glmnet doesn't know what's the response automatically, so must do [,-1]
+predict_lasso_20k <- predict(lasso_20k, as.matrix(data_20k_test[,-1]), type = 'response', s = 'lambda.1se')
+class_lasso_20k <- ifelse(predict_lasso_20k > 0.5, 1, 0) #set threshold at 0.5
+mce_lasso_20k <- mean(data_20k_test$rating != class_lasso_20k)
+mce_lasso_20k # misclassification error (MCE) = 0.1836433
+pROC::roc(data_20k_test$rating, predict_lasso_20k, plot=T) # AUC = 0.8814
+```
+
+The LASSO and Relaxed LASSO (logit) predictions have similar AUCs, though the LASSO model slightly underperforms. Therefore, ut should be fine using either one.
+
+# Appendices
+
+## Tips for running a big job
+
++ Always start with a smaller subset
++ We can save results after running a BIG job
+    + `save()` and `load()`: save the results using `save(result1, result2, file="Today.results")` and load them back using `load("Today.results")`
+    + `saveRDS()` and `readRDS()` are alternatives to `save()` and `load()` respectively. `saveRDS()` and `readRDS()` are recommended because `readRDS()` will not overwrite existing results in the current environment.
++ Or we can set `cache=TRUE` in the chunk setup so that the results are cached (saved) and the chunk will not be evaluated again when nothing is changed. 
+
+## Word Frequency in details 
+
+**a) Change to lower case**: 
+```{r eval=F}
+mycorpus2 <- tm_map(mycorpus1, content_transformer(tolower))
+as.character(mycorpus2[[4]])
+```
+
+**b) Remove some non-content words**: 
+```{r eval=F}
+stopwords("english") # you may modify this list!
+mycorpus3<- tm_map(mycorpus2, removeWords, stopwords("english"))
+# stopwd <- stopwords("english") # list the words might be removed. Notice we may want to keep some words like "few", "most"
+# mycorpus3<- tm_map(mycorpus2, removeWords, stopwd)
+# lapply(mycorpus3[4:5], as.character)
+as.character(mycorpus3[[4]])
+```
+
+** c) Remove punctuation**:
+```{r eval=F}
+mycorpus4 <- tm_map(mycorpus3, removePunctuation)
+# lapply(mycorpus4[4:5], as.character)
+as.character(mycorpus4[[5]])
+```
+
+** d) Remove numbers **: 
+```{r eval=F}
+mycorpus5 <- tm_map(mycorpus4, removeNumbers)
+# lapply(mycorpus5[4:5], as.character)
+as.character(mycorpus5[[4]])
+```
+
+** e} Word stem**
+
+A **stem** is a part of word. `stemDocument` uses stemming algorithm to take away affixes (e.g de-, -(e)d, -(e)s).
+
+```{r eval=F}
+mycorpus6 <- tm_map(mycorpus5, stemDocument, lazy = TRUE)   
+lapply(mycorpus6[4:5], as.character)
+# lapply(mycorpus6[4:5], inspect)
+```
+
+
+## Random Forest
+
+`Random Forest` is implemented here. Here we introduce another `RF` package `ranger` which is much faster.
+
+We will start with a small subset here: 5000 for training and 1000 for testing.
+
+### Splitting data
+```{r eval=F}
+names(data2)[1:20] # notice that user_id, stars and date are in the data2
+str(data2)[1:20]
+data2$rating <- as.factor(data2$rating)
+table(data2$rating)
+dim(data2)     #n=100000, p=1076
+#str(data2)  object.size(data2)  435Mb!!!
+
+# Reserve 1000 as test data
+set.seed(1)
+n <- nrow(data2)
+test.index <- sample(n, 1000)
+length(test.index)
+data2.test <- data2[test.index, -c(1:3)] # only keep rating and the texts
+data2.train <- data2[-test.index, -c(1:3)]
+n1 <- nrow(data2.train)
+data2.train <- data2.train[sample(n1, 5000), ]
+#names(data2.train)
+dim(data2.train)
+```
+
+### `randomForest` package
+
+It takes about one hour to run
+```{r, eval=F}
+fit.rf.train <- randomForest(rating~., data2.train, ntree=100) # for ntree=100, it took 3 minutes.
+plot(fit.rf.train) 
+  # We look at the middle line: OOB mis-classification errors.
+  # Red: mic among "0"
+  # Green: mic among "1"
+  # Notice that  50 trees are not large enough. The OOB error for 50 trees is 
+fit.rf.train$err.rate[50, 1] #  OOB mis-classification error with 1/2 as the threshold.
+fit.rf.train$err.rate[100, 1] # 
+names(fit.rf.train)
+fit.rf.train$mtry   # default  p= dim(data2.train)[2]; mtry=sqrt(p)
+fit.rf.train$votes[1: 100] # OOB prob
+fit.rf.train$predicted[1:100] # majority vote
+fit.rf.train$confusion # gives us the confusion matrix for the last forest!
+
+predict.rf <- predict(fit.rf.train, newdata=data2.test)  # output the classes by majority vote using all the trees evaluated with testing data
+mean(data2.test$rating != predict.rf) # MCE is .207 which is closed to OOB error of .21# MCE is .207 which is closed to OOB error of .21
+
+# fit.rf.train.200 <- randomForest(rating~., data2.train, ntree=200) # 5minutes, not bad
+```
+
+
+```{r}
+# save(fit.rf.train.200, file = "TextMing.RF.RData")  # save the rf.200 into .RDate file
+load("data/TextMing.RF.RData")  # load the results saved in "TextMing.RF.RData"
+plot(fit.rf.train.200)
+fit.rf.train.200$err.rate[200]
+```
+
+### `ranger` package
+
+Alternatively we use `ranger()`, a faster implementation of random forests
+```{r eval=F}
+fit.rf.ranger <- ranger::ranger(rating~., data2.train, num.trees = 200, importance="impurity") # no plotting fun
+fit.rf.ranger
+imp <- importance(fit.rf.ranger)
+imp[order(imp, decreasing = T)][1:20]
+
+fit.rf.ranger$confusion # gives us the confusion matrix for the last forest!
+
+predict.rf <- predict(fit.rf.ranger, data=data2.test, type="response")  # output the classes by majority vote
+mean(data2.test$rating != predict.rf$predictions)
+```
+
+
+
+## PCA
+Let's apply PCA to dtm
+
+1) We first get PC scores using train
+
+2) Then convert the testing dtm to PC scores based on 1)
+
+3) Tried a few methods
+    + LASSO/Ridge on PC's 
+    + LASSO/glm on PC's
+    + RF on PC's 
+    
+The testing errors are all comparable to that of using the original dtm. This is no surprising if you look at the scree plot, we don't really have any breaks in the plot. We pretty much end up using most of the PC's which is equivalent to use all our original dtm as input. 
+
+
+```{r eval=F}
+## Results saved in Text.RData
+#load("/Users/lindazhao/Desktop/Dropbox/STAT471/Data/Text.RData")
+# Take a subset first
+set.seed(10)
+data1 <- sample_n(data2, size=2000)     # data1 has the labels for stars and rating
+names(data1)[1:10]
+data1 <- data1[, -c(1:3)]  # we keep only rating and the dtm
+data1$rating <- as.factor(data1$rating)  # make sure rating is coded as a factor
+levels(data1$rating)
+
+
+# Get train/test data 
+
+set.seed(1)
+n=nrow(data1)
+test.index <- sample(n, 0.3*n)
+length(test.index)
+data2.test <- data1[test.index, ] # only keep rating and the texts
+data2.train <- data1[-test.index, ]
+names(data2.train)[1:3]
+dim(data2.train)
+
+# Get pc's for training data
+
+pc.train <- prcomp(data2.train[, -c(1)], scale=TRUE)  # Take the rating out
+names(pc.train)
+pc.train$center[1:50] # means for each word
+hist(pc.train$center, breaks=50,
+     col="blue",
+     main="mean frequency of the words")  
+
+# How do PC's capture the variabilities of the entire dtm?
+
+pc.train.imp <- t((summary(pc.train))$importance)   # this is a matrix
+pc.train.imp <- as.data.frame(pc.train.imp) 
+names(pc.train.imp) <- c("Sdev", "PVE", "CPVE")
+attach(pc.train.imp)
+par(mfrow=c(3,1))
+hist(Sdev)
+plot(PVE, xlim=c(1, 10)) # 2 to 3 PC's 
+plot(CPVE, main="Scree plot of CPVE")  # It is completely increasing no breaks.
+detach(pc.train.imp)
+
+
+
+# Extract PC scores
+#dim(pc.train$rotation)
+pc.train.scores <- pc.train$x    # This contains all the 1072 pc scores for the original dtm
+dim(pc.train.scores)          # right
+
+
+pc.test.scores <- predict(pc.train, data2.test[, -c(1)])   # get pc scores for testing data
+dim(pc.test.scores)
+```
+
+
+### Analysis I: LASSO
+```{r eval=F}
+y <- data2.train$rating
+X <- as.matrix(data2.train[, -c(1)])
+#result.lasso <- cv.glmnet(X, y, alpha=.99, family="binomial")  # 5 minutes in my MAC
+plot(result.lasso)
+beta.lasso <- coef(result.lasso, s="lambda.min")   # output lasso estimates
+beta <- beta.lasso[which(beta.lasso !=0),] # non zero beta's
+beta <- as.matrix(beta);
+beta <- rownames(beta)
+#beta  
+
+# Get testing error directly from LASSO
+predict.lasso <- predict(result.lasso, as.matrix(data2.test[, c(-1)]), s="lambda.min", type = "response")
+class.lasso <- rep("0", nrow(data2.test))
+class.lasso[predict.lasso > .5] <- "1"
+
+
+testerror.lasso <- mean(data2.test$rating != class.lasso)
+testerror.lasso     # Ridge testing error is .215 and .216 for LASSO
+
+
+
+
+# Input the words from LASSO into glm
+glm.input <- as.formula(paste("rating", "~", paste(beta[-1],collapse = "+"))) # prepare the formulae
+result.glm <- glm(glm.input, family=binomial, data2.train ) # instantly 
+
+# Testing errors
+
+predict.glm <- predict(result.glm, data2.test, type = "response")
+class.glm <- rep("0", nrow(data2.test))
+class.glm[predict.glm > .5] <- "1"
+length(class.glm)
+
+testerror.glm <- mean(data2.test$rating != class.glm)
+testerror.glm   # mis classification error is about .2 agree with what we got before
+## This is only done with 10,000 obsn. Will come back to it.
+pROC::roc(data2.test$rating, predict.glm, plot=T) # AUC=.83!!!!
+```
+
+### Analysis II: LASSO with PC scores
+```{r eval=F}
+y <- data2.train$rating
+X <- as.matrix(pc.train.scores)    # pc scores for training data
+result.lasso <- cv.glmnet(X, y, alpha=0, family="binomial")  # 5 minutes in my MAC
+plot(result.lasso)
+beta.lasso <- coef(result.lasso, s="lambda.min")   # output lasso estimates
+beta <- beta.lasso[which(beta.lasso !=0),] # non zero beta's
+beta <- as.matrix(beta);
+beta <- rownames(beta)
+beta[1:20]   
+
+# Testing errors with pc.test.scores
+
+predict.glm <- predict(result.lasso, pc.test.scores, type = "response")
+class.glm <- rep("0", nrow(data2.test))
+class.glm[predict.glm > .5] ="1"
+length(class.glm)
+
+testerror.glm <- mean(data2.test$rating != class.glm)
+testerror.glm
+pROC::roc(data2.test$rating, predict.glm, plot=T) 
+```
+
+### Analysis III
+I tried using leading PC's instead of choosing PC's with LASSO. It didn't make much of the difference.
+
+
+## TF-IDF
+tf-idf: term frequency - inverse document frequency. It might work better if we use tf-idf matrix.
+
+To incorporate the length of each text and how frequent a word appears across all the documents, one proposal is to scale each entry as follows: For each document i and word j,
+
+- $n_{i,j}$ is the term frequency, 
+- $n_{i\cdot}$=length of document i
+- $n_{\cdot j}$=sum of word j appears among all documents
+- $tfidf_{i, j}= (n_{i,j}/n_{i\cdot})  log(n/n_{\cdot j})$
+  
+Remark: Some what arbitrary scaling.
+
+```{r, message=FALSE, warning=FALSE, eval=F}
+n <- nrow(data)
+n
+
+# Set stars as a categorical variable. Also group stars 1-3 as 0 and 4,5 as 1
+
+data$rating <- rep(0, n)
+data$rating[data$stars >= 4] = 1
+data$rating <- as.factor(data$rating)
+
+
+## Make tfidf matrix by setting control
+dtm.tfidf<- DocumentTermMatrix(mycorpus6, control=list(dictionary = words.10, weighting = weightTfIdf )) 
+dtm.tfidf <- as.matrix(dtm.tfidf)
+dim(dtm.tfidf)
+
+data3 <- cbind(data, dtm.tfidf)
+dim(data3)
+data3 <- data.frame(data3)
+names(data3)[1:20]
+
+# data4 consists of user_id, stars, date, rating and all the top 10% words
+data4 <- data3[, c(1,7, 8,11, 13:1084)]
+dim(data4)
+names(data4)[1:20]
+
+###### Time to do analyses using texts
+# Will apply a few methods and to compare the testing errors
+
+# Reserve 10000 as test data
+set.seed(1)
+test.index <- sample(100000, 10000)
+data4.test <- data4[test.index, -c(1:3)] # only keep rating and the texts
+data4.train <- data4[-test.index, -c(1:3)]
+# str(data4.train)
+
+# Use logistic regression
+result.tfidf.glm <- glm(rating~., family=binomial, data4.train)
+predict.tfidf.glm <- predict(result.tfidf.glm, data4.test, type = "response")
+class.tfidf.glm <- rep("0", 10000)
+class.tfidf.glm[predict.tfidf.glm > .5] ="1"
+
+testerror.tfidf.glm <- mean(data4.test$rating != class.tfidf.glm)
+testerror.tfidf.glm   # mis classification error is .1864 (0.1889)
+
+
+### Time to have a word cloud by sorted logistic coefficients
+
+result.tfidf.glm.coef <-coef(result.tfidf.glm)
+
+# Collect words with positive coefficients with "Good" rankings. Use
+# the coefficients as the weights
+good.tfidf.glm <- result.tfidf.glm.coef[which(result.tfidf.glm.coef > 0)]
+names(good.tfidf.glm)[1:50]
+
+
+good.tfidf.fre <- sort(good.tfidf.glm, decreasing = TRUE)
+good.tfidf.word <- names(good.tfidf.fre)
+cor.special <- brewer.pal(8,"Dark2") # 8=number of col's
+wordcloud(good.tfidf.word[1:100], good.tfidf.fre[1:100], 
+          colors=cor.special, ordered.colors=F)
+
+## Similarly we will group words with negative coefficients with a
+# decreasing order. This will form a cloud for the "bad" ranks.
+
+bad.tfidf.glm <- result.tfidf.glm.coef[which(result.tfidf.glm.coef < 0)]
+names(bad.tfidf.glm)[1:50]
+
+bad.tfidf.fre <- sort(-bad.tfidf.glm, decreasing = TRUE)
+# notice we sort -coefficients
+bad.tfidf.word <- names(bad.tfidf.fre)
+cor.special <- brewer.pal(8,"Dark2")
+wordcloud(bad.tfidf.word[1:100], bad.tfidf.fre[1:100], 
+          color=cor.special, ordered.colors=F)
+
+# put two word clouds together
+cor.special.g <- brewer.pal(8,"Dark2")
+cor.special.b <- brewer.pal(6,"Dark2")
+par(mfrow=c(1,2))
+wordcloud(good.tfidf.word[1:100], good.tfidf.fre[1:100], 
+          colors=cor.special.g, ordered.colors=F)
+wordcloud(bad.tfidf.word[1:100], bad.tfidf.fre[1:100], 
+          color=cor.special.b, rot.per=.15, ordered.colors=F)
+par(mfrow=c(1,1))
+
+```
