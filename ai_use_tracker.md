@@ -24,4 +24,9 @@ In case of Claude Code usage, please remember to use `/export` to save the log.
 
 ## Rehan
 
+- Claude chat
+  - Used Claude chat interface as a co-working tool to design and implement the text mining analysis pipeline (RQ1). I made all substantive analytical decisions and provided source code, using Claude to refine and adapt for new data.
+  - **Debugging**: Fed error messages to Claude, particular for package alignment issues and one data alignment issue (a row mismatch in the DTM for the partisan stratification model)
+  - **Code structure**: Claude suggested the loop-based approach for running multiple models efficiently. 
+
 ## Ying

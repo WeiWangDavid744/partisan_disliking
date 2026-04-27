@@ -48,6 +48,12 @@ categorical outcomes for multinomial LASSO text mining models:
 
 Negative values (-8) recoded to NA as residual non-response codes (check for data cleaning and EDA)
 
+### 04-27-2026
+
+#### 2016 open-ended data unavailable
+
+All respondents from 2017 have non-responses on the free text response for dem_like, rep_like, dem_dislike, and rep_dislike, suggesting that the ANES did not release open-ended data for tihs year. These respondensts are excluded from text mining models, and fixed year effects do not cover this year. 
+
 #### Text predictors and DTMs
 
 **Text predictors**: Open-ended responss (dem_like + dem_dislike; rep_like + rep_dislike) coded into a single column (dem_text; rep_text).These will predict the thermometer class outcomes.
@@ -58,9 +64,30 @@ Negative values (-8) recoded to NA as residual non-response codes (check for dat
 
 Next step is LASSO modeling (2 outcome measures x 3 text methods). I'll force in year as a fixed effect and cluster standard errors as requested. 
 
+#### Completed text mining analysis (up to step 2 in RQ)
+
+- Ran six LASSO models for stems / n-grams / skip-grams for two outcomes (dem_therm_cat, rep_therm_cat). Year fixed effects forced in across all models. 2016 excluded as open-ended data unavailable in the ANES data.
+
+- Produced relaxed LASSO / logistic regression on LASSO-selected terms. Was unable to implement clustered SEs via sandwich: : vcovCL() because of an error (recorded in r workbook). Reported regular SEs instead. Year fixed effects included in all models. Note that this step took a long time (over 1 hour) to run, so we should be judicious in future analyses.
+
+Carried out two robustness checks: 
+
+(1) Partisan stratification anlaysis, limited samples to Republicans rating Democrats and Democrats rating Republicans respectively. This caused a class imbalance (i.e., most sample is in lower temperature ratings), so I switched "type.measure" to "deviance" from "class", as "class" selected zero text terms. Results were substantively consistent with the full sample.
+
+(2) Alternative outcome -- CSES liking scale (0-10, recoded to 5 classes). Results consistent with feeling thermometer models. Republican favorability predictors introduce more policy-specific terms (e.g, "military", "pro-life") for this outcome measure.
+
+Produced **manual coding list** of top 25 animosity terms for each party exported to "data/animosity_coding_list.csv" to manual coding under Fowler et al., codebook. Restricted coding to class 1 predictors only (i.e., 0-20 feeling thermometer).
+
+**Scoping** - Each of the three text representations (stems, n-grams, skip-grams) produce substantively consistent results. For the presentation and write-up, we could lead with one of these three and present the others as supplementary material. Future analyses could consider binary or 3-class outcomes for partisan stratified models to address the class imbalance. 
+
 #### Analysis rationale
 ANES feeling thermometers cluster at round numbers, which makes a continuous outcome inappropriate. Moreover, we have done text-mining for classification tasks and it makes sense to apply it in that way here. Give bands provide enough detail to distinguish animosity from favorability while keeping classes well populated. 
 
-Makes sense to use a multi-class measure since we can see how different terms may be associated with animosity / favorability, before manually coding them. 
+Makes sense to use a multi-class measure since we can see how different terms may be associated with animosity / favorability, before manually coding them.
+
+We should restrict manula coding to animosity (class 1, or 0-20 feeling thermometer) predictors, because the lead research question focuses on partisan animosity specifically. Coding all 171 terms across five classes would be very time-consuming for the team given finals commitments. Focusing on the top 25 predictors will be most theoretically relevant.
+
+
+
 
 ## Ying
