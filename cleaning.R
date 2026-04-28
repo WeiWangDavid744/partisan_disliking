@@ -9,7 +9,7 @@
 }
 
 #-----
-# SKIP TO LINE 119
+# SKIP TO LINE 148
 # open-ended response files
 # vars included: year-specific case ID, D/R dis/like responses
 #-----
@@ -93,10 +93,8 @@ oe_full_cln <- oe_full %>%
   mutate(across(all_of(cols),
                 ~ if_else(.x %in% c(unique_strings, '<DK>'), NA_character_, .x)))
 
-write_csv(oe_full_cln, 'data/merged_open-ended_08-24.csv')
-
 #----- 
-# identify discrepancies between oe_full and each time series file's case ID
+# fix discrepancies between oe_full and each time series file's case ID
 #-----
 # year-specific data files
 df_08 <- haven::read_dta('data/raw_anes/anes_timeseries_2008_v20150519.dta')
@@ -105,8 +103,38 @@ df_16 <- haven::read_dta('data/raw_anes/anes_timeseries_2016_v20190904.dta')
 df_20 <- read_csv('data/raw_anes/anes_timeseries_2020_v20220210.csv')
 df_24 <- read_csv('data/raw_anes/anes_timeseries_2024_v20250808.csv')
 
-# Using the code below, I identified a respondent in oe_24 but not df_24. I later exclude this person.
-id_excl <- setdiff(oe_full %>% filter(year == 2024) %>% pull(caseid), df_24$V240001)
+# check discrepancies for each year (anyone in oe_full_cln but not in df)
+# 08, 12, 20, 24 caseids are all fine
+id_excl_08 <- setdiff(oe_full_cln %>% filter(year == 2008) %>% pull(caseid), df_08$V080001)
+id_excl_12 <- setdiff(oe_full_cln %>% filter(year == 2012) %>% pull(caseid), df_12$caseid)
+# as noted in documentation, oe caseids for 2016 are different from caseids in df_16
+id_excl_20 <- setdiff(oe_full_cln %>% filter(year == 2020) %>% pull(caseid), df_20$V200001)
+id_excl_24 <- setdiff(oe_full_cln %>% filter(year == 2024) %>% pull(caseid), df_24$V240001)
+
+# 2016 caseids in the open-ended data were later recoded in the CDF. 
+# Here I substitute the old caseids for the new ones (recorded in df_16).
+caseid16_map <- df_16 %>%
+  select(
+    caseid_new = V160001,
+    caseid = V160001_orig
+  ) %>%
+  mutate(
+    caseid_new = as.character(caseid_new),
+    caseid = as.character(caseid)
+  )
+
+oe_full_cln16 <- oe_full_cln %>%
+  left_join(caseid16_map, by = 'caseid') %>%
+  mutate(caseid = if_else(year == 2016 & !is.na(caseid_new),
+                          caseid_new,
+                          caseid)) %>%
+  select(-caseid_new)
+
+# exclude respondent in oe_24 but not df_24
+oe_full_cln_final <- oe_full_cln16 %>%
+  filter(!(year == 2024 & caseid %in% id_excl_24))
+
+write_csv(oe_full_cln_final, 'data/merged_open-ended_08-24.csv')
 
 #-----
 # subset cumulative time series data file to only post-08 for smaller file size

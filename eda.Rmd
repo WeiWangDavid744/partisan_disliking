@@ -1,0 +1,232 @@
+---
+title: "eda"
+author: "Wei Wang (David)"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, comment = ' ')
+pacman::p_load(tidyverse, ggplot2)
+```
+
+### Analysis goals
+- PID distributions of the sample, 08-24
+- Line chart of Democratic and Republican feeling thermometer ratings, 08-24 (`dem_therm` and `rep_therm`; weighted means)
+  + Four lines * two panels: Full sample, Dem respondents, Rep respondents, Ind respondents
+  + Run the same analysis for with `dem_liking_cses` and `rep_liking_cses` as robustness
+- Stacked bar charts of non-responses
+  + Also: broken down over time (clustered stacked bar chart)
+
+```{r}
+# load data
+data <- read_csv('data/data.csv')
+```
+
+### PID distributions of the sample, 08-24
+
+```{r rawcount}
+# plot raw sample size count by year and partisanship
+data_pid7_count <- data %>%
+  filter(!is.na(pid7)) %>%
+  mutate(party = case_when(
+    pid7 %in% 1:2 ~ 'Democrat',
+    pid7 == 3 ~ 'Lean Democrat',
+    pid7 == 4 ~ 'Independent',
+    pid7 == 5 ~ 'Lean Republican',
+    pid7 %in% 6:7 ~ 'Republican'
+  )) %>%
+  mutate(party = factor(party, levels = c(
+    'Democrat', 'Lean Democrat', 'Independent', 'Lean Republican', 'Republican'))) %>%
+  count(year, party)
+plot_pid7_count <- data_pid7_count %>%
+  ggplot(aes(x = factor(year), y = n, fill = party)) + 
+  geom_col() +
+  scale_fill_manual(values = c('Democrat' = '#2166ac',
+                               'Lean Democrat' = '#5b9bd5',
+                               'Independent' = 'gray60',
+                               'Lean Republican' = '#d97862',
+                               'Republican' = '#b2182b')) +
+  labs(
+    x = 'Year',
+    y = 'Count',
+    title = 'Sample size by year and partisanship',
+    fill = 'Partisanship'
+  ) +
+  theme_minimal()
+plot_pid7_count
+
+ggsave('outputs/fig_eda_rawcount.png', plot_pid7_count, width = 7, height = 4.5, dpi = 300)
+```
+
+```{r proportions}
+data_pid7_prop <- data_pid7_count %>%
+  group_by(year) %>%
+  mutate(prop = n/sum(n)) %>%
+  ungroup()
+
+plot_pid7_prop <- data_pid7_prop %>%
+  ggplot(aes(x = factor(year), y = prop, fill = party)) + 
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c('Democrat' = '#2166ac',
+                               'Lean Democrat' = '#5b9bd5',
+                               'Independent' = 'gray60',
+                               'Lean Republican' = '#d97862',
+                               'Republican' = '#b2182b')) +
+  labs(
+    x = 'Year',
+    y = 'Percentage',
+    title = 'Partisanship distributions by year',
+    fill = 'Partisanship'
+  ) +
+  theme_minimal()
+
+plot_pid7_prop
+
+ggsave('outputs/fig_eda_props.png', plot_pid7_prop, width = 7, height = 4.5, dpi = 300)
+```
+
+### Weighted mean feeling thermometer ratings, 08-24
+
+```{r thermometer}
+# function for calculating weighted means
+func_therm_mean <- function(df, therm_var, subsam_label, filter_expr) {
+  df %>%
+    filter(!is.na(.data[[therm_var]]), !is.na(weight), {{ filter_expr }}) %>%
+    group_by(year) %>%
+    summarise(mean_therm = weighted.mean(.data[[therm_var]], weight), .groups = 'drop') %>%
+    mutate(group = subsam_label)
+}
+
+# function for creating dataframe for plotting
+therm_summary <- function(df, therm_var) {
+  bind_rows(
+    func_therm_mean(df, therm_var, 'Full sample', TRUE),
+    func_therm_mean(df, therm_var, 'Democrats',   pid7 %in% 1:3),
+    func_therm_mean(df, therm_var, 'Independents', pid7 == 4),
+    func_therm_mean(df, therm_var, 'Republicans', pid7 %in% 5:7)
+  ) %>%
+    mutate(group = factor(group, levels = c('Full sample', 'Democrats', 'Independents', 'Republicans')))
+}
+
+# plotting function
+therm_plot <- function(df, therm_var, title) {
+  therm_summary(df, therm_var) |>
+    ggplot(aes(x = year, y = mean_therm, color = group)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c('Full sample' = 'gray10',
+                                  'Democrats'   = '#2166ac',
+                                  'Independents' = 'gray60',
+                                  'Republicans' = '#b2182b')) +
+    scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+    labs(title = title, 
+         x = 'Year', 
+         y = 'Mean thermometer rating \n (0-49 = Cold; 51-100 = Warm)', 
+         color = 'Subsample') +
+    theme_minimal()
+}
+
+plot_demtherm <- therm_plot(data, 'dem_therm', 'Feeling thermometer for the Democratic Party')
+plot_reptherm <- therm_plot(data, 'rep_therm', 'Feeling thermometer for the Republican Party')
+plot_demtherm
+plot_reptherm
+
+ggsave('outputs/fig_eda_demtherm.png', plot_demtherm, width = 7, height = 4.5, dpi = 300)
+ggsave('outputs/fig_eda_reptherm.png', plot_reptherm, width = 7, height = 4.5, dpi = 300)
+```
+
+### Robustness: Weighted mean CSES liking ratings, 08-24
+
+```{r}
+# reuse dataframe functions for thermometer
+# slight modifications to the plotting function
+liking_plot <- function(df, therm_var, title) {
+  therm_summary(df, therm_var) |>
+    ggplot(aes(x = year, y = mean_therm, color = group)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c('Full sample' = 'gray10',
+                                  'Democrats'   = '#2166ac',
+                                  'Independents' = 'gray60',
+                                  'Republicans' = '#b2182b')) +
+    scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+    scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) +
+    labs(title = title, 
+         x = 'Year', 
+         y = 'Mean CSES liking rating \n (0 = Strongly dislike; 10 = Strongly like)', 
+         color = 'Subsample') +
+    theme_minimal()
+}
+
+plot_demlike <- liking_plot(data, 'dem_liking_cses', 'Liking for the Democratic Party (CSES)')
+plot_replike <- liking_plot(data, 'rep_liking_cses', 'Liking for the Republican Party (CSES)')
+plot_demlike
+plot_replike
+
+ggsave('outputs/fig_eda_demliking.png', plot_demlike, width = 7, height = 4.5, dpi = 300)
+ggsave('outputs/fig_eda_repliking.png', plot_replike, width = 7, height = 4.5, dpi = 300)
+```
+
+### Distribution of nonresponses 
+
+```{r}
+# recode data first
+recode_y <- function(bin, text) {
+  text_present <- !is.na(text) & nchar(trimws(text)) > 0
+  y <- rep(NA_integer_, length(bin))
+  y[bin == 5]                  <- 'Did not reach open-ended question'
+  y[bin == 1 & !text_present]  <- 'No response'
+  y[bin == 1 &  text_present]  <- 'Responded'
+  y[is.na(bin) == T]           <- 'NA for parent question'
+  y
+}
+
+data$y_dem_like    <- recode_y(data$dem_like_binary,    data$dem_like)
+data$y_dem_dislike <- recode_y(data$dem_dislike_binary, data$dem_dislike)
+data$y_rep_like    <- recode_y(data$rep_like_binary,    data$rep_like)
+data$y_rep_dislike <- recode_y(data$rep_dislike_binary, data$rep_dislike)
+
+# prep df for plotting
+data_na <- data %>%
+  select(y_dem_like, y_dem_dislike, y_rep_like, y_rep_dislike) %>%
+  pivot_longer(everything(), names_to = 'question', values_to = 'response') %>%
+  count(question, response) %>%
+  group_by(question) %>%
+  mutate(prop = n/sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    question = factor(question,
+                      level = c('y_dem_like', 'y_dem_dislike', 'y_rep_like', 'y_rep_dislike'),
+                      labels = c('Dem like', 'Dem dislike', 'Rep like', 'Rep dislike')),
+    response = factor(response,
+                      levels = c('NA for parent question',
+                                 'Did not reach open-ended question',
+                                 'No response',
+                                 'Responded'))
+    )
+
+# plot stacked bar chart
+plot_na <- data_na %>%
+  ggplot(aes(x = question, y = prop, fill = response)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c('Responded'                         = '#66bd63',
+                              'No response'                        = 'gray35',
+                              'Did not reach open-ended question'  = 'gray60',
+                              'NA for parent question'             = 'gray80')) +
+  geom_text(aes(label = scales::percent(prop, accuracy = 1)),
+            position = position_stack(vjust = 0.5),
+            size = 4, color = 'white', fontface = 'bold') +
+  labs(x = NULL, y = 'Percentage', fill = NULL,
+       title = 'Proportion of non-response by open-ended question') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = 'bottom')
+plot_na
+
+ggsave('outputs/fig_eda_na.png', plot_na)
+```
+
