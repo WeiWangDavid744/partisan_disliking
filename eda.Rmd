@@ -136,6 +136,56 @@ plot_reptherm
 
 ggsave('outputs/fig_eda_demtherm.png', plot_demtherm, width = 7, height = 4.5, dpi = 300)
 ggsave('outputs/fig_eda_reptherm.png', plot_reptherm, width = 7, height = 4.5, dpi = 300)
+
+# outparty thermometer only
+plot_outparty <- bind_rows(
+  func_therm_mean(data, 'rep_therm', 'Democrats -> GOP', pid7 %in% 1:3),
+  func_therm_mean(data, 'dem_therm', 'Republicans -> DEM', pid7 %in% 5:7)
+) %>%
+  mutate(group = factor(group, levels = c('Democrats -> GOP',
+                                           'Republicans -> DEM'))) %>%
+  ggplot(aes(x = year, y = mean_therm, color = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c('Democrats -> GOP' = '#2166ac',
+                                 'Republicans -> DEM' = '#b2182b')) +
+  scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(title = 'Out-party feeling thermometer ratings',
+       x = 'Year',
+       y = 'Mean thermometer rating \n (0-49 = Cold; 51-100 = Warm)',
+       color = 'Subsample') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = 'bottom')
+
+plot_outparty
+ggsave('outputs/fig_eda_outparty_therm.png', plot_outparty, width = 7, height = 4.5, dpi = 300)
+
+# inparty thermometer only
+plot_inparty <- bind_rows(
+  func_therm_mean(data, 'dem_therm', 'Democrats -> DEM', pid7 %in% 1:3),
+  func_therm_mean(data, 'rep_therm', 'Republicans -> GOP', pid7 %in% 5:7)
+) %>%
+  mutate(group = factor(group, levels = c('Democrats -> DEM',
+                                           'Republicans -> GOP'))) %>%
+  ggplot(aes(x = year, y = mean_therm, color = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c('Democrats -> DEM' = '#2166ac',
+                                 'Republicans -> GOP' = '#b2182b')) +
+  scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(title = 'In-party feeling thermometer ratings',
+       x = 'Year',
+       y = 'Mean thermometer rating \n (0-49 = Cold; 51-100 = Warm)',
+       color = 'Subsample') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = 'bottom')
+
+plot_inparty
+ggsave('outputs/fig_eda_inparty_therm.png', plot_inparty, width = 7, height = 4.5, dpi = 300)
 ```
 
 ### Robustness: Weighted mean CSES liking ratings, 08-24
