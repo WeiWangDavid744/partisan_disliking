@@ -270,7 +270,10 @@ data.frame(outcome    = y_vars,
 ```{r cv-plots, fig.height = 6}
 png("data/lasso_response_output/viz_cv_plots.png", width = 1200, height = 900, res = 150)
 par(mfrow = c(2, 2))
-for (y in y_vars) { plot(results[[y]]$cv); title(y, line = 2.5) }
+plot(results[["y_dem_like"]]$cv);    title("Democrat favorability",    line = 2.5)
+plot(results[["y_dem_dislike"]]$cv); title("Democrat animosity", line = 2.5)
+plot(results[["y_rep_like"]]$cv);    title("Republican favorability",  line = 2.5)
+plot(results[["y_rep_dislike"]]$cv); title("Republican animosity", line = 2.5)
 par(mfrow = c(1, 1))
 dev.off()
 ```
@@ -361,6 +364,26 @@ I will take Ying's work and create visualizations that are consistent format wit
 
 ```{r viz_response_rate, results='show', fig.width=8, fig.height=4}
 
+response_data <- data.frame(
+  Item = c("Dem likes", "Dem dislikes", "Rep likes", "Rep dislikes"),
+  Responded = c(
+    sum(data$y_dem_like    == 1, na.rm = TRUE),
+    sum(data$y_dem_dislike == 1, na.rm = TRUE),
+    sum(data$y_rep_like    == 1, na.rm = TRUE),
+    sum(data$y_rep_dislike == 1, na.rm = TRUE)
+  ),
+  No_response = c(
+    sum(data$y_dem_like    == 0, na.rm = TRUE),
+    sum(data$y_dem_dislike == 0, na.rm = TRUE),
+    sum(data$y_rep_like    == 0, na.rm = TRUE),
+    sum(data$y_rep_dislike == 0, na.rm = TRUE)
+  )
+) %>%
+  mutate(Total = Responded + No_response) %>%
+  pivot_longer(cols = c(Responded, No_response),
+               names_to = "Status", values_to = "Count") %>%
+  mutate(Proportion = Count / Total)
+
 p_response <- ggplot(response_data, 
                      aes(x = Item, y = Proportion, fill = Status)) +
   geom_col(position = "stack", width = 0.4) +
@@ -379,19 +402,127 @@ p_response
 ggsave("data/lasso_response_output/viz_response_rate.png",
        p_response, width = 8, height = 4, dpi = 300)
 ```
-
-
-## Coefficient plots
-
+With all types of non-responses:
 
 ```{r}
+data_raw <- read.csv("data/data.csv", header = TRUE, na.strings = c("", "NA"))
 
-library(ggplot2)
-library(dplyr)
+make_response_breakdown <- function(bin_var, text_var, label) {
+  bin  <- data_raw[[bin_var]]
+  text <- data_raw[[text_var]]
+  text_present <- !is.na(text) & nchar(trimws(text)) > 0
+  
+  data.frame(
+    Item   = label,
+    Status = case_when(
+      is.na(bin)                    ~ "NA for parent question",
+      bin == 5                      ~ "Did not reach open-ended question",
+      bin == 1 & !text_present      ~ "No response",
+      bin == 1 &  text_present      ~ "Responded",
+      TRUE                          ~ NA_character_
+    )
+  )
+}
 
-# Function to extract clustered SE results as a tidy data frame
+response_long <- bind_rows(
+  make_response_breakdown("dem_like_binary",    "dem_like",    "Dem like"),
+  make_response_breakdown("dem_dislike_binary", "dem_dislike", "Dem dislike"),
+  make_response_breakdown("rep_like_binary",    "rep_like",    "Rep like"),
+  make_response_breakdown("rep_dislike_binary", "rep_dislike", "Rep dislike")
+) %>%
+  filter(!is.na(Status)) %>%
+  count(Item, Status) %>%
+  group_by(Item) %>%
+  mutate(Proportion = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    Item   = factor(Item, levels = c("Dem like", "Dem dislike", 
+                                      "Rep like", "Rep dislike")),
+    Status = factor(Status, levels = c(
+      "NA for parent question",
+      "No response",
+      "Did not reach open-ended question",
+      "Responded"
+    ))
+  )
+
+p_response <- ggplot(response_long,
+                     aes(x = Item, y = Proportion, fill = Status)) +
+  geom_col(position = "stack", width = 0.4) +
+  geom_text(aes(label = paste0(round(Proportion * 100), "%")),
+            position = position_stack(vjust = 0.5),
+            size = 3.5, color = "white", fontface = "bold") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c(
+    "Responded"                          = "steelblue",
+    "No response"                        = "gray40",
+    "Did not reach open-ended question"  = "gray65",
+    "NA for parent question"             = "gray85"
+  )) +
+  labs(title = "Proportion of non-response by open-ended question",
+       x = "", y = "Percentage", fill = "") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank())
+
+p_response
+ggsave("data/lasso_response_output/viz_response_rate.png",
+       p_response, width = 8, height = 5, dpi = 300)
+
+
+
+```
+
+```{r}
+# Label lookup
+term_labels <- c(
+  "pid7Dem"           = "Party ID: Democrat",
+  "pid7Rep"           = "Party ID: Republican",
+  "ideologyLib"       = "Ideology: Liberal",
+  "ideologyCon"       = "Ideology: Conservative",
+  "dem_ideoLib"       = "Dem. party seen as: Liberal",
+  "dem_ideoCon"       = "Dem. party seen as: Conservative",
+  "rep_ideoLib"       = "Rep. party seen as: Liberal",
+  "rep_ideoCon"       = "Rep. party seen as: Conservative",
+  "party_diff2"       = "Parties are different (yes)",
+  "party_diff9"       = "Parties are different (DK)",
+  "party_more_consv2" = "Republicans more conservative (correct)",
+  "party_more_consv9" = "Republicans more conservative (DK)",
+  "right_track2"      = "Country on wrong track",
+  "dem_therm"         = "Democrat thermometer",
+  "rep_therm"         = "Republican thermometer",
+  "age"               = "Age",
+  "gender2"           = "Gender: Female",
+  "gender3"           = "Gender: Other",
+  "race_eth2"         = "Race: Black",
+  "race_eth3"         = "Race: Asian",
+  "race_eth4"         = "Race: Native American",
+  "race_eth5"         = "Race: Hispanic",
+  "race_eth6"         = "Race: Other",
+  "educ7NoHS"         = "Education: No high school",
+  "educ7BA_plus"      = "Education: College+",
+  "marital_status2"   = "Marital: Widowed",
+  "marital_status3"   = "Marital: Divorced/separated",
+  "marital_status4"   = "Marital: Never married",
+  "marital_status5"   = "Marital: Partnered",
+  "work_status2"      = "Work: Part-time",
+  "work_status3"      = "Work: Temporarily laid off",
+  "work_status4"      = "Work: Unemployed",
+  "work_status5"      = "Work: Retired",
+  "health_insur2"     = "No health insurance",
+  "reg_census2"       = "Region: Midwest",
+  "reg_census3"       = "Region: South",
+  "reg_census4"       = "Region: West"
+)
+
+apply_labels <- function(df) {
+  df %>%
+    mutate(term_label = ifelse(term %in% names(term_labels),
+                               term_labels[term], term))
+}
+
 tidy_coeftest <- function(ct, outcome_name) {
-  df <- data.frame(
+  data.frame(
     term     = rownames(ct),
     estimate = ct[, 1],
     se       = ct[, 2],
@@ -405,24 +536,10 @@ tidy_coeftest <- function(ct, outcome_name) {
       lower   = estimate - 1.96 * se,
       upper   = estimate + 1.96 * se,
       sig     = ifelse(p < 0.05, "p < 0.05", "p >= 0.05")
-    )
-  df
+    ) %>%
+    apply_labels()
 }
 
-# Extract all four models
-coef_all <- bind_rows(
-  tidy_coeftest(results[["y_dem_like"]]$coef_test,    "Dem likes"),
-  tidy_coeftest(results[["y_dem_dislike"]]$coef_test, "Dem dislikes"),
-  tidy_coeftest(results[["y_rep_like"]]$coef_test,    "Rep likes"),
-  tidy_coeftest(results[["y_rep_dislike"]]$coef_test, "Rep dislikes")
-)
-
-```
-
-Democrat outcomes coefficient plots:
-
-```{r}
-# Define predictor family groupings
 get_family <- function(term) {
   case_when(
     grepl("^pid7|^ideology|^dem_ideo|^rep_ideo", term) ~ "1_Partisanship/Ideology",
@@ -440,32 +557,34 @@ coef_all <- bind_rows(
   tidy_coeftest(results[["y_rep_like"]]$coef_test,    "Rep likes"),
   tidy_coeftest(results[["y_rep_dislike"]]$coef_test, "Rep dislikes")
 ) %>%
-  mutate(family = get_family(term))
+  mutate(pred_family = get_family(term))
+```
+
+## Coefficient plots
+
+Democrat outcomes coefficient plots:
+
+```{r}
 
 # Plot with family-based ordering
 p_dem <- coef_all %>%
   filter(outcome %in% c("Dem likes", "Dem dislikes")) %>%
-  arrange(family, estimate) %>%
-  mutate(term = factor(term, levels = unique(term))) %>%
-  ggplot(aes(x = term, y = estimate,
-             color = sig, shape = sig)) +
+  arrange(pred_family, estimate) %>%
+  mutate(term_label = factor(term_label, levels = unique(term_label))) %>%
+  ggplot(aes(x = term_label, y = estimate, color = sig, shape = sig)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
   coord_flip() +
   facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
-  scale_color_manual(values = c("p < 0.05" = "steelblue",
-                                 "p >= 0.05" = "gray60")) +
+  scale_color_manual(values = c("p < 0.05" = "steelblue", "p >= 0.05" = "gray60")) +
   scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.05" = 1)) +
-  labs(x = "", y = "Log-odds coefficient (clustered SE)",
-       color = "", shape = "") +
+  labs(x = "", y = "Log-odds coefficient (clustered SE)", color = "", shape = "") +
   theme_minimal(base_size = 9) +
-  theme(
-    legend.position = "bottom",
-    panel.spacing = unit(3, "cm"),
-    axis.text.y = element_text(size = 7.5),
-    strip.text = element_text(size = 10, face = "bold")
-  )
+  theme(legend.position = "bottom",
+        panel.spacing = unit(3, "cm"),
+        axis.text.y = element_text(size = 7.5),
+        strip.text = element_text(size = 10, face = "bold"))
 
 p_dem
 ggsave("data/lasso_response_output/viz_dem_coefs.png",
@@ -477,35 +596,26 @@ Republican outcomes coefficient plots:
 ```{r}
 p_rep <- coef_all %>%
   filter(outcome %in% c("Rep likes", "Rep dislikes")) %>%
-  arrange(family, estimate) %>%
-  mutate(term = factor(term, levels = unique(term))) %>%
-  ggplot(aes(x = term, y = estimate,
-             color = sig, shape = sig)) +
+  arrange(pred_family, estimate) %>%
+  mutate(term_label = factor(term_label, levels = unique(term_label))) %>%
+  ggplot(aes(x = term_label, y = estimate, color = sig, shape = sig)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
   coord_flip() +
   facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
-  scale_color_manual(values = c("p < 0.05" = "tomato",
-                                 "p >= 0.05" = "gray60")) +
+  scale_color_manual(values = c("p < 0.05" = "tomato", "p >= 0.05" = "gray60")) +
   scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.05" = 1)) +
-  labs(x = "", y = "Log-odds coefficient (clustered SE)",
-       color = "", shape = "") +
+  labs(x = "", y = "Log-odds coefficient (clustered SE)", color = "", shape = "") +
   theme_minimal(base_size = 9) +
-  theme(
-    legend.position = "bottom",
-    panel.spacing = unit(3, "cm"),
-    axis.text.y = element_text(size = 7.5),
-    strip.text = element_text(size = 10, face = "bold")
-  )
+  theme(legend.position = "bottom",
+        panel.spacing = unit(3, "cm"),
+        axis.text.y = element_text(size = 7.5),
+        strip.text = element_text(size = 10, face = "bold"))
 
 p_rep
 ggsave("data/lasso_response_output/viz_rep_coefs.png",
        p_rep, width = 14, height = 12, dpi = 300)
-
-
-
-
 ```
 
 Filtered to only top 10 terms:
@@ -515,6 +625,7 @@ Filtered to only top 10 terms:
 # Filter to top 10 significant terms by absolute coefficient, per outcome
 top10_coefs <- coef_all %>%
   filter(sig == "p < 0.05") %>%
+  filter(!grepl("gender3", term)) %>%
   group_by(outcome) %>%
   arrange(desc(abs(estimate))) %>%
   slice_head(n = 10) %>%
@@ -522,18 +633,18 @@ top10_coefs <- coef_all %>%
 
 p_dem_top10 <- top10_coefs %>%
   filter(outcome %in% c("Dem likes", "Dem dislikes")) %>%
-  mutate(term = reorder(term, estimate)) %>%
-  ggplot(aes(x = term, y = estimate, color = outcome, shape = outcome)) +
+  mutate(term_label = reorder(term_label, estimate)) %>%
+  ggplot(aes(x = term_label, y = estimate, color = outcome, shape = outcome)) +
   geom_point(size = 2.5) +
   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
   coord_flip() +
   facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
-  scale_color_manual(values = c("Dem likes" = "steelblue", 
+  scale_color_manual(values = c("Dem likes" = "steelblue",
                                  "Dem dislikes" = "steelblue4")) +
   scale_shape_manual(values = c("Dem likes" = 16, "Dem dislikes" = 17)) +
-  labs(title = "Top predictors of Democrat open-ended response (significant terms only)",
-       x = "", y = "Log-odds coefficient (clustered SE)", 
+  labs(title = "Top predictors of Democrat open-ended response",
+       x = "", y = "Log-odds coefficient (clustered SE)",
        color = "", shape = "") +
   theme_minimal(base_size = 9) +
   theme(legend.position = "none",
@@ -543,18 +654,18 @@ p_dem_top10 <- top10_coefs %>%
 
 p_rep_top10 <- top10_coefs %>%
   filter(outcome %in% c("Rep likes", "Rep dislikes")) %>%
-  mutate(term = reorder(term, estimate)) %>%
-  ggplot(aes(x = term, y = estimate, color = outcome, shape = outcome)) +
+  mutate(term_label = reorder(term_label, estimate)) %>%
+  ggplot(aes(x = term_label, y = estimate, color = outcome, shape = outcome)) +
   geom_point(size = 2.5) +
   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
   coord_flip() +
   facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
-  scale_color_manual(values = c("Rep likes" = "tomato", 
+  scale_color_manual(values = c("Rep likes" = "tomato",
                                  "Rep dislikes" = "tomato4")) +
   scale_shape_manual(values = c("Rep likes" = 16, "Rep dislikes" = 17)) +
-  labs(title = "Top predictors of Republican open-ended response (significant terms only)",
-       x = "", y = "Log-odds coefficient (clustered SE)", 
+  labs(title = "Top predictors of Republican open-ended response",
+       x = "", y = "Log-odds coefficient (clustered SE)",
        color = "", shape = "") +
   theme_minimal(base_size = 9) +
   theme(legend.position = "none",
@@ -614,18 +725,20 @@ knitr::kable(year_fe_ying,
 
 ```{r}
 tidy_coeftest(coeftest(fit.p, vcov. = V.p), "Pooled") %>%
-  ggplot(aes(x = reorder(term, estimate), y = estimate,
-             color = sig, shape = sig)) +
+  filter(!grepl("gender3", term)) %>%
+  mutate(pred_family = get_family(term)) %>% 
+  arrange(pred_family, estimate) %>%
+  mutate(term_label = factor(term_label, levels = unique(term_label))) %>%
+  ggplot(aes(x = term_label, y = estimate, color = sig, shape = sig)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
   coord_flip() +
-  scale_color_manual(values = c("p < 0.05" = "darkgreen",
-                                 "p >= 0.05" = "gray60")) +
-  scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.05" = 1)) +
-  labs(x = "", y = "Log-odds coefficient (clustered SE)",
-       color = "", shape = "",
-       title = "Pooled outcome robustness check") +
+  scale_color_manual(values = c("p < 0.05" = "darkgreen", "p >= 0.05" = "gray60")) +
+  scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.055" = 1)) +
+  labs(title = "Pooled outcome robustness check",
+       x = "", y = "Log-odds coefficient (clustered SE)",
+       color = "", shape = "") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "bottom") -> p_pooled
 

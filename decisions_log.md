@@ -87,8 +87,18 @@ Makes sense to use a multi-class measure since we can see how different terms ma
 
 We should restrict manula coding to animosity (class 1, or 0-20 feeling thermometer) predictors, because the lead research question focuses on partisan animosity specifically. Coding all 171 terms across five classes would be very time-consuming for the team given finals commitments. Focusing on the top 25 predictors will be most theoretically relevant.
 
+### 04-28-2026
 
+#### Skip-gram DTM sparsity thresholds
 
+After inclusion of the 2016 year data, we have to adjust the sparsity thresholds for the Relaxed LASSO model:
+
+- **Regular LASSO** - keep at 1% threshold (terms appearing in ≥1% of documents). More terms improve variable selection, and LASSO is designed for high-dimensional problems, shrinking irrelevant terms to zero.
+
+- **Relaxed GLM** - adjust to 1.5% threshold (terms appearing in ≥1.5% of documents). This is needed because the model hits a parameter limit (~1030 weights) if we try using the full 1% skip-gram DTM, after 2016 data was included. At 1.5% the term counts are 135 for the Democrat thermometer model and 123 for the Republican model, which is within the model limits. 
+
+#### Analysis rationale
+This is methodologically sound because LASSO results are the primary output - word lists, coefficients and visualizations all derive from the LASSO steps. The GLM step provides unpenalized coefficient estimates and SEs for the LASSO-selected subset only. 
 
 ## Ying
 

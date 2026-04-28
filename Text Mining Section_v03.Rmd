@@ -363,9 +363,6 @@ dtm.rep.ngram <- dtm.rep.ngram[, !colnames(dtm.rep.ngram) %in% remove_terms]
 dtm.rep.skip  <- dtm.rep.skip[,  !colnames(dtm.rep.skip)  %in% remove_terms]
 
 
-# Model specifications and storage
-valid_years <- c("2008", "2012", "2020", "2024")
-
 model_specs <- list(
   list(name = "1a_dem_stem",  dtm = dtm.dem.stem,  data = data.dem.tm, outcome = "dem_therm_cat"),
   list(name = "1b_dem_ngram", dtm = dtm.dem.ngram, data = data.dem.tm, outcome = "dem_therm_cat"),
@@ -393,7 +390,6 @@ for (spec in model_specs) {
     dtm_mat
   ) %>%
     filter(!is.na(outcome)) %>%
-    filter(year %in% valid_years) %>%
     mutate(year = droplevels(year))
   
   X <- sparse.model.matrix(outcome ~ ., data = model_data)[, -1]
@@ -490,6 +486,9 @@ cat("\nAll 6 models complete. Results saved.\n")
 
 ```
 
+**Note** - climate change was the strongest Republican animosity predictor excluding 2016, but it falls below the 1% document frequency threshold in the Republican corpus once 2016 is included. This suggests its salience as a partisan cue emerged after 2016. But for now, we can just say that remove mentions of climate from our analysis. 
+
+
 The dem n-gram results are comparable to the stem results we looked at earlier. The dem skip grams are also similar, though it is now interesting to see "power" as a term under negativity. The year fixed effects are also consistent. 
 
 For the republican stem results, there are affect, identity or sentiment based words ("racist", "hate", "Trump", "religion", "power" - interesting this comes up for both parties, "corporations", "lie") with "climate" being the main policy term - though "religion" and "corporations" could also be understood as policy-adjacent, as could "Trump" - given negative affect may be linked to this his policies. The "n-grams" adds a couple of other identity-based terms: "poor", "white", and a policy-based term: "rights". The Republican skip-gram also includes "big business" which is an interesting and more sophisticated inclusion, though semantically similar to "corporations".
@@ -514,7 +513,7 @@ Climate is a wedge issue - a top area of animosity for Republicans, and favorabi
 
 ## Relaxed LASSO
 
-We then run the relaxed LASSO (logistic regression) with clustered SEs as requested. 
+We then run the relaxed LASSO (logistic regression). 
 
 This is a computationally intensive process, so let's make sure we are not duplicating efforts:
 
@@ -548,34 +547,56 @@ stripGlmLR <- function(cm) {
 
 ```
 
-Build the glm model using the terms selected by LASSO - restricting to only skip-gram models:
+Build the glm model using the terms selected by LASSO - restricting to only skip-gram model. Note that we have too many terms and get this error with trying to run glm with 2016 added back in, so we can adjust sparsity threshold from 1% to 1.5%:
+
+```{r}
+# Stricter threshold for GLM — reduces term count to manageable size
+dtm.dem.skip.glm <- removeSparseTerms(dtm.dem.skip, 1 - 0.015)
+dtm.rep.skip.glm <- removeSparseTerms(dtm.rep.skip, 1 - 0.015)
+
+cat("Dem skip GLM terms:", dtm.dem.skip.glm$ncol, "\n")
+cat("Rep skip GLM terms:", dtm.rep.skip.glm$ncol, "\n")
+```
 
 ```{r}
 
 # Restrict relaxed LASSO to skip-gram models only
 skip_specs <- list(
-  list(name = "1c_dem_skip"),
-  list(name = "2c_rep_skip")
+  list(name = "1c_dem_skip", dtm = dtm.dem.skip.glm,
+       data = data.dem.tm, outcome = "dem_therm_cat"),
+  list(name = "2c_rep_skip", dtm = dtm.rep.skip.glm,
+       data = data.rep.tm, outcome = "rep_therm_cat")
 )
-
 for (spec in skip_specs) {
   cat("\n=== Building GLM data:", spec$name, "===\n")
   
-  coefs      <- all_results[[spec$name]]$coefs
-  model_data <- all_results[[spec$name]]$model_data
-  X_full     <- as.matrix(all_results[[spec$name]]$X)
+  # Rebuild model data from reduced DTM
+  dtm_mat <- as.matrix(spec$dtm)
+  outcome_vec <- as.factor(spec$data[[spec$outcome]])
   
+  model_data <- data.frame(
+    outcome = outcome_vec,
+    year    = as.factor(spec$data$year),
+    dtm_mat
+  ) %>%
+    filter(!is.na(outcome)) %>%
+    mutate(year = droplevels(year))
+  
+  X_reduced <- sparse.model.matrix(outcome ~ ., data = model_data)[, -1]
+  
+  # Get LASSO-selected terms that exist in the reduced matrix
+  coefs <- all_results[[spec$name]]$coefs
   selected_terms <- unique(unlist(lapply(coefs, function(cc) {
     terms <- rownames(cc)[which(cc != 0)]
     terms[!grepl("^\\(Intercept\\)", terms)]
   })))
   
-  keep_cols <- selected_terms[selected_terms %in% colnames(X_full)]
+  keep_cols <- selected_terms[selected_terms %in% colnames(X_reduced)]
   cat("Terms passed to GLM:", length(keep_cols), "\n")
   
   train_glm <- data.frame(
     outcome = model_data$outcome,
-    X_full[, keep_cols]
+    as.matrix(X_reduced[, keep_cols])
   )
   
   all_results[[spec$name]]$train_glm <- train_glm
@@ -731,7 +752,6 @@ for (spec in robust_specs_partisan) {
     dtm_mat
   ) %>%
     filter(!is.na(outcome)) %>%
-    filter(year %in% valid_years) %>%
     mutate(year = droplevels(year))
   
   # THEN apply partisan filter
@@ -959,7 +979,6 @@ for (spec in robust_specs_cses) {
     dtm_mat
   ) %>%
     filter(!is.na(outcome)) %>%
-    filter(year %in% valid_years) %>%
     mutate(year = droplevels(year))
   
   cat("Sample size:", nrow(model_data), "\n")
@@ -1137,14 +1156,14 @@ png("data/text_mining_output/viz_lasso_dem_skip.png",
     width = 800, height = 600, res = 150)
 par(mar = c(5, 4, 6, 2))
 plot(all_results[["1c_dem_skip"]]$lasso, 
-     main = "Democrat skip-grams -> dem_therm_cat")
+     main = "Democrat responses -> feeling thermometer")
 dev.off()
 
 png("data/text_mining_output/viz_lasso_rep_skip.png",
     width = 800, height = 600, res = 150)
 par(mar = c(5, 4, 6, 2))
 plot(all_results[["2c_rep_skip"]]$lasso,
-     main = "Republican skip-grams -> rep_therm_cat")
+     main = "Republican responses -> feeling thermometer")
 dev.off()
 ```
 
