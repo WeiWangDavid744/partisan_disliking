@@ -1,0 +1,1571 @@
+---
+title: "Text Mining Sections - Fold into main report"
+authors: "David Wang, Ying Zhang, Rehan Mirza"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: '4'
+urlcolor: blue
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, results = "hide", fig.width=8, fig.height=4)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, tidyverse, ggplot2, data.table, stringr, tm, SnowballC, tidytext, NLP, RColorBrewer, wordcloud, gridExtra, glmnet, coefplot, nnet, sandwich, clubSandwich
+)
+# cache = TRUE: R chunks wouldn't be updated if data is not changed. 
+# added tidytext, nnet, sandwich, NLP, tidyverse, ggplot2, gridextra
+```
+\pagebreak
+
+# Deciding on negative sentiment cutoffs
+
+*[BELOW FOR INTERNAL DISCUSSION ONLY]*
+
+The feeling thermometer is a scale that makes it hard to interpret. Where exactly do we draw the line between a positive, negative or neutral cutoff? Moreover, with the text mining exercises we covered in class, we were working with binary and multiclass classification tasks / outcomes, not continuous outcomes. I therefore think it makes sense to reclassify the feeling thermometer as a binary scale. 
+
+Let's look at the distributions of our outcome variables of interest first (potentially this can be folded into EDA):
+
+
+```{r viz_cdf, results='show', fig.width=10, fig.height=5}
+
+data <- read_csv("data/data.csv")
+
+# Distribution of both thermometers
+summary(data$dem_therm)
+summary(data$rep_therm)
+
+table(data$dem_therm)[c("0", "10", "20", "30", "40","50", "60", "70", "80", "90" , "100")]
+table(data$rep_therm)[c("0", "10", "20", "30", "40","50", "60", "70", "80", "90" , "100")]
+
+# Save to file
+png("data/text_mining_output/viz_cdf.png", width = 1200, height = 600, res = 150)
+par(mfrow = c(1,2))
+plot(ecdf(data$dem_therm),
+     main = "CDF: Democrat Thermometer",
+     xlab = "Feeling (0-100)", ylab = "Cumulative Proportion",
+     col = "steelblue", lwd = 2, verticals = TRUE, do.points = FALSE)
+abline(v = c(20, 40, 60, 80), col = "gray", lty = 2)
+abline(h = 0.5, col = "red", lty = 2)
+plot(ecdf(data$rep_therm),
+     main = "CDF: Republican Thermometer",
+     xlab = "Feeling (0-100)", ylab = "Cumulative Proportion",
+     col = "tomato", lwd = 2, verticals = TRUE, do.points = FALSE)
+abline(v = c(20, 40, 60, 80), col = "gray", lty = 2)
+abline(h = 0.5, col = "red", lty = 2)
+par(mfrow = c(1,1))
+dev.off()
+
+# Display inline
+par(mfrow = c(1,2))
+plot(ecdf(data$dem_therm),
+     main = "CDF: Democrat Thermometer",
+     xlab = "Feeling (0-100)", ylab = "Cumulative Proportion",
+     col = "steelblue", lwd = 2, verticals = TRUE, do.points = FALSE)
+abline(v = c(20, 40, 60, 80), col = "gray", lty = 2)
+abline(h = 0.5, col = "red", lty = 2)
+plot(ecdf(data$rep_therm),
+     main = "CDF: Republican Thermometer",
+     xlab = "Feeling (0-100)", ylab = "Cumulative Proportion",
+     col = "tomato", lwd = 2, verticals = TRUE, do.points = FALSE)
+abline(v = c(20, 40, 60, 80), col = "gray", lty = 2)
+abline(h = 0.5, col = "red", lty = 2)
+par(mfrow = c(1,1))
+```
+Note: Check what the negative values are (e.g., -8 could be non-response). Clean data for now:
+
+```{r}
+data <- data %>%
+  mutate(
+    dem_therm = if_else(dem_therm < 0, NA, dem_therm),
+    rep_therm = if_else(rep_therm < 0, NA, rep_therm)
+  )
+```
+
+
+
+The median for both parties falls at 50. There are a significant large proportion of partisans at zero thermometer for both parties. 
+
+Overall we can see three broad clusters coming up for both parties:
+
+- 0-40: animosity toward the party (~20-30% of sample)
+- 40-60: moderate views toward the party (~30% of sample)
+- 60-100: favors the party (~15-20% of sample)
+- Perhaps the remainder are non-responses
+
+There is an interesting temporal component to understand how animosity has changed over time in the EDA.
+
+```{r}
+data <- read_csv("data/data.csv") %>%
+  mutate(
+    dem_therm = if_else(dem_therm < 0, NA, dem_therm),
+    rep_therm = if_else(rep_therm < 0, NA, rep_therm),
+    dem_therm_cat = case_when(
+      dem_therm < 20  ~ 1L,  # highly unfavorable
+      dem_therm < 40  ~ 2L,  # unfavorable
+      dem_therm < 60  ~ 3L,  # neutral
+      dem_therm < 80  ~ 4L,  # favorable
+      dem_therm >= 80 ~ 5L,  # highly favorable
+      .default = NA_integer_
+    ),
+    rep_therm_cat = case_when(
+      rep_therm < 20  ~ 1L,
+      rep_therm < 40  ~ 2L,
+      rep_therm < 60  ~ 3L,
+      rep_therm < 80  ~ 4L,
+      rep_therm >= 80 ~ 5L,
+      .default = NA_integer_
+    )
+  )
+
+prop.table(table(data$dem_therm_cat)) |> round(3)
+prop.table(table(data$rep_therm_cat)) |> round(3)
+
+```
+
+
+These bands are all are substantive - though it is interesting that when people dislike the parties, they tend to really dislike them. 
+    
+\pagebreak
+
+# Step 1: Create corpora, clean corpora and create DTMs
+
+## Create corpora
+
+We created the multiclass outcomes for the thermometer in the previous section.
+
+We now want to consolidate the free response sections:
+
+- Free text responses about Democrats: 'dem_like' and 'dem_dislike' into 'dem_text'
+
+- Free text responses about Republicans: 'rep_like' and 'rep_dislike' into 'rep_text'
+
+```{r}
+data <- data %>%
+  mutate(
+    dem_text = paste(
+      if_else(is.na(dem_like), "", dem_like),
+      if_else(is.na(dem_dislike), "", dem_dislike)
+    ),
+    rep_text = paste(
+      if_else(is.na(rep_like), "", rep_like),
+      if_else(is.na(rep_dislike), "", rep_dislike)
+    )
+  )
+
+# Quick check
+data %>% select(dem_text, rep_text) %>% head(10)
+```
+
+We then build these into the corpora:
+
+- `VCorpus()`: create Volatile Corpus
+- `inspect()`: display detailed info of a corpus
+
+```{r}
+mycorpus.dem <- VCorpus(VectorSource(data$dem_text))
+mycorpus.rep <- VCorpus(VectorSource(data$rep_text))
+
+# Inspect a few documents
+lapply(mycorpus.dem[1:5], as.character)
+lapply(mycorpus.rep[1:5], as.character)
+```
+From this we can see the dataset still includes non-respondents to these questions. We can keep them in the dataset for now, but add a new variable to flag respondnets / non-respondents, and then retain only respondents with text-responses. 
+
+```{r}
+# Flag respondents with usable text, but keep all rows in data
+data <- data %>%
+  mutate(
+    has_dem_text = trimws(dem_text) != "",
+    has_rep_text = trimws(rep_text) != ""
+  )
+
+# How many have usable text?
+table(data$has_dem_text)
+table(data$has_rep_text)
+
+# Subsets for text mining only
+data.dem.tm <- data %>% filter(has_dem_text)
+data.rep.tm <- data %>% filter(has_rep_text)
+
+cat("Dem text mining sample:", nrow(data.dem.tm), "\n")
+cat("Rep text mining sample:", nrow(data.rep.tm), "\n")
+```
+
+The large proportion of non-text respondents (~40% for each party) is substantial, validating the Heckman approach for selection effects as a potential study extension. We will rebuild the corpora without these responses:
+
+```{r}
+#Recreate corpora using only the 'text mining' data (i.e., excluding non-respondents)
+mycorpus.dem <- VCorpus(VectorSource(data.dem.tm$dem_text))
+mycorpus.rep <- VCorpus(VectorSource(data.rep.tm$rep_text))
+
+lapply(mycorpus.dem[1:5], as.character)
+lapply(mycorpus.rep[1:5], as.character)
+```
+
+## Clean corpora
+
+We will create a two different sets of cleaned corpora:
+
+- 'Stemmed corpora' - for basic stem text mining analysis  - removes punctuation
+- 'N-gram / ski-gram' corpora' - keeps punctuation. we do need to need to bother with, for instance, converting periods to the word 'PERIOD' as suggested in the lecture, because we are not really dealing with full sentences.
+
+
+```{r}
+# Cleaning steps for all corpora
+clean_corpus <- function(corpus, remove_punct = TRUE) {
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, stopwords("english"))
+  if (remove_punct) corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus
+}
+
+# Stem corpora - remove punctuation and stem
+mycorpus.dem.stem <- clean_corpus(mycorpus.dem, remove_punct = TRUE)
+mycorpus.dem.stem <- tm_map(mycorpus.dem.stem, stemDocument, lazy = TRUE)
+
+mycorpus.rep.stem <- clean_corpus(mycorpus.rep, remove_punct = TRUE)
+mycorpus.rep.stem <- tm_map(mycorpus.rep.stem, stemDocument, lazy = TRUE)
+
+#N-gram / skip-gram (keep punctuation)
+mycorpus.dem.ngram <- clean_corpus(mycorpus.dem, remove_punct = FALSE)
+mycorpus.rep.ngram <- clean_corpus(mycorpus.rep, remove_punct = FALSE)
+
+```
+
+```{r}
+
+# Check corpora
+cat("=== Dem stem corpus ===\n")
+lapply(mycorpus.dem.stem[1:5], as.character)
+
+cat("=== Rep stem corpus ===\n")
+lapply(mycorpus.rep.stem[1:5], as.character)
+```
+
+## Build DTMs
+
+We will be building six DTMs in total: two sets of Stem, N-gram, and skip-gram DTMs respectively for Republicans and Democrats.
+
+```{r}
+# Stem DTMs
+
+dtm.dem.stem <- DocumentTermMatrix(mycorpus.dem.stem) |>
+  removeSparseTerms(1 - 0.01)
+
+dtm.rep.stem <- DocumentTermMatrix(mycorpus.rep.stem) |>
+  removeSparseTerms(1 - 0.01)
+
+cat("=== Dem stem DTM ===\n"); inspect(dtm.dem.stem)
+cat("=== Rep stem DTM ===\n"); inspect(dtm.rep.stem)
+```
+
+
+```{r}
+# N-gram DTMs
+
+ngram_tokenizer <- function(x, n = 2) {
+  unlist(lapply(ngrams(words(x), 1:n), paste, collapse = "_"), use.names = FALSE)
+}
+
+dtm.dem.ngram <- DocumentTermMatrix(
+  mycorpus.dem.ngram,
+  control = list(tokenize = function(x) ngram_tokenizer(x, 2))
+) |> removeSparseTerms(1 - 0.01)
+
+dtm.rep.ngram <- DocumentTermMatrix(
+  mycorpus.rep.ngram,
+  control = list(tokenize = function(x) ngram_tokenizer(x, 2))
+) |> removeSparseTerms(1 - 0.01)
+
+cat("=== Dem n-gram DTM ===\n"); inspect(dtm.dem.ngram)
+cat("=== Rep n-gram DTM ===\n"); inspect(dtm.rep.ngram)
+```
+
+
+```{r}
+# Skip-gram DTMs - takes a few minutes to run!!
+skipgram_tokenizer <- function(x, n = 2, k = 2) {
+  toks <- words(x)
+  if (length(toks) < 2) return(character(0))
+  # tidytext expects a data frame input
+  df <- data.frame(text = paste(toks, collapse = " "), stringsAsFactors = FALSE)
+  sg <- tidytext::unnest_tokens(df, ngram, text, 
+                                 token = "skip_ngrams", 
+                                 n = n, k = k)
+  sg$ngram
+}
+
+dtm.dem.skip <- DocumentTermMatrix(
+  mycorpus.dem.ngram,
+  control = list(tokenize = function(x) skipgram_tokenizer(x, n = 2, k = 2))
+) |> removeSparseTerms(1 - 0.01)
+
+dtm.rep.skip <- DocumentTermMatrix(
+  mycorpus.rep.ngram,
+  control = list(tokenize = function(x) skipgram_tokenizer(x, n = 2, k = 2))
+) |> removeSparseTerms(1 - 0.01)
+
+cat("=== Dem skip-gram DTM ===\n"); inspect(dtm.dem.skip)
+cat("=== Rep skip-gram DTM ===\n"); inspect(dtm.rep.skip)
+```
+
+
+## Multinomial LASSO models (Full sample)
+
+We will run two sets of models - one with the full sample, and the other with only partisan out-party samples. First lets trim the glm model
+
+
+```{r}
+# Helper function to strip GLM fat (from lecture)
+stripGlmLR <- function(cm) {
+  cm$y = c(); cm$model = c(); cm$residuals = c()
+  cm$fitted.values = c(); cm$effects = c(); cm$qr$qr = c()
+  cm$linear.predictors = c(); cm$weights = c()
+  cm$prior.weights = c(); cm$data = c()
+  cm$family$variance = c(); cm$family$dev.resids = c()
+  cm$family$aic = c(); cm$family$validmu = c()
+  cm$family$simulate = c()
+  attr(cm$terms, ".Environment") = c()
+  attr(cm$formula, ".Environment") = c()
+  cm
+}
+```
+
+### Dem stems -> democratic thermometer (building model template)
+
+Now we can merge the DTMs with the thermometer data for each model, starting with the Dem stems mode:
+
+
+```{r}
+
+# Remove "year" and "years" from the DTM to avoid model matrix conflicts
+remove_terms <- c("year", "years")
+dtm.dem.stem  <- dtm.dem.stem[,  !colnames(dtm.dem.stem)  %in% remove_terms]
+
+# --- Merge DTM with outcome and year ---
+dtm.dem.stem.mat <- as.matrix(dtm.dem.stem)
+
+# filter to years with open-ended data only (2016 unavailable)
+valid_years <- c("2008", "2012", "2020", "2024")
+
+
+model.data.1a <- data.frame(
+  dem_therm_cat = as.factor(data.dem.tm$dem_therm_cat),
+  year          = as.factor(data.dem.tm$year),
+  dtm.dem.stem.mat
+) %>%
+  filter(!is.na(dem_therm_cat)) %>%
+  filter(year %in% valid_years) %>%
+  mutate(year = droplevels(year))  # drop unused 2016 level cleanly
+
+cat("Model 1a sample size:", nrow(model.data.1a), "\n")
+cat("Years included:", levels(model.data.1a$year), "\n")
+cat("Outcome distribution:\n")
+print(prop.table(table(model.data.1a$dem_therm_cat)) |> round(3))
+
+```
+Create model matrix, forcing in year
+
+```{r}
+X.1a <- sparse.model.matrix(dem_therm_cat ~ ., data = model.data.1a)[, -1]
+
+year_cols <- grep("^year", colnames(X.1a))
+penalty.1a <- rep(1, ncol(X.1a))
+penalty.1a[year_cols] <- 0
+
+y.1a <- model.data.1a$dem_therm_cat
+```
+
+Run the LASSO model:
+
+```{r}
+set.seed(5710)
+lasso.1a <- cv.glmnet(
+  x             = X.1a,
+  y             = y.1a,
+  alpha         = 0.99,
+  family        = "multinomial",
+  type.measure  = "class",
+  penalty.factor = penalty.1a
+)
+
+plot(lasso.1a)
+cat("lambda.1se:", lasso.1a$lambda.1se, "\n")
+cat("lambda.min:", lasso.1a$lambda.min, "\n")
+```
+
+It appears that the LASSO model selects somewhere between ~90 to 150 variables.
+
+```{r}
+# --- Extract selected terms at lambda.1se ---
+coef.1a <- coef(lasso.1a, s = "lambda.1se")
+
+# Get unique non-zero terms across all 5 classes (excluding intercept + year dummies)
+selected.1a <- unique(unlist(lapply(coef.1a, function(x) {
+  terms <- rownames(x)[which(x != 0)]
+  terms[!grepl("^\\(Intercept\\)|^year", terms)]
+})))
+
+cat("Terms selected by LASSO (Model 1a):", length(selected.1a), "\n")
+print(selected.1a)
+
+
+
+```
+We also want to see per class selected terms:
+
+```{r}
+# Per-class selected terms
+for (k in 1:5) {
+  class_coef <- coef.1a[[k]]
+  class_terms <- rownames(class_coef)[
+    which(class_coef != 0) 
+  ]
+  class_terms <- class_terms[!grepl("^\\(Intercept\\)|^year", class_terms)]
+  cat("\n=== Class", k, "(n terms:", length(class_terms), ") ===\n")
+}
+
+# Top positive and negative coefficients per class for Model 1a
+for (k in 1:5) {
+  class_coef <- coef.1a[[k]]
+  
+  # Extract non-zero, non-intercept, non-year coefficients
+  idx <- which(class_coef != 0)
+  terms <- rownames(class_coef)[idx]
+  vals <- as.numeric(class_coef)[idx]
+  
+  # Remove intercept and year dummies
+  keep <- !grepl("^\\(Intercept\\)|^year", terms)
+  terms <- terms[keep]
+  vals <- vals[keep]
+  
+  # Sort and show top 10 positive and top 10 negative
+  df <- data.frame(term = terms, coef = vals) |>
+    arrange(desc(coef))
+  
+  cat("\n=== Class", k, "— Top 10 POSITIVE (predicts this class) ===\n")
+  print(head(df, 10))
+  
+  cat("\n=== Class", k, "— Top 10 NEGATIVE (predicts away from this class) ===\n")
+  print(tail(df, 10))
+}
+
+```
+
+The leading terms positively predicting class 1 (i.e., 0-20 on thermometer ratings) including negative sentiment, identity, and affect words ("lie", "socialist"), and policy terms ("border", "crime", 
+"illegal"), though there is also filler ("anything", "nothing"). There seem to be more policy words class 2 (0-40 on thermometer), such as "welfare", "abortion", and "policies".
+
+For class 5 (80-100 on thermometer), there are both positive sentiment and identity and affect words ("fair", "middle" and "class", "common" and "people", "inclusive", "care") and "climate" appears as a policy term.
+
+
+We can now save model results:
+
+```{r}
+# Save Model 1a results
+lasso.1a.coefs <- lapply(1:5, function(k) {
+  class_coef <- coef.1a[[k]]
+  idx <- which(class_coef != 0)
+  terms <- rownames(class_coef)[idx]
+  vals <- as.numeric(class_coef)[idx]
+  keep <- !grepl("^\\(Intercept\\)|^year", terms)
+  data.frame(
+    term = terms[keep],
+    coef = vals[keep],
+    class = k,
+    model = "1a_dem_stem"
+  )
+}) |> bind_rows()
+
+# Quick look at animosity vs favorability side by side
+cat("=== Model 1a: Top animosity predictors (Class 1) ===\n")
+lasso.1a.coefs |> filter(class == 1) |> arrange(desc(coef)) |> head(15) |> print()
+
+cat("\n=== Model 1a: Top favorability predictors (Class 5) ===\n")
+lasso.1a.coefs |> filter(class == 5) |> arrange(desc(coef)) |> head(15) |> print()
+```
+
+The top favorability and animosity predictors align with the individual classes.
+
+Before moving on, let's take a look at the year fixed effects.
+
+
+```{r}
+
+# Check how year got dummy-coded
+levels(as.factor(data.dem.tm$year))
+
+# Year coefficients for Model 1a — per class
+for (k in 1:5) {
+  class_coef <- coef.1a[[k]]
+  idx <- which(class_coef != 0)
+  terms <- rownames(class_coef)[idx]
+  vals <- as.numeric(class_coef)[idx]
+  
+  # Keep only year dummies
+  keep <- grepl("^year", terms)
+  df <- data.frame(term = terms[keep], coef = vals[keep]) |>
+    arrange(term)
+  
+  cat("\n=== Class", k, "— Year fixed effects ===\n")
+  print(df)
+}
+```
+These results suggest that animosity toward Democrats was lowest in 2008, rising sharply before peaking in 2020, though it remains high. Similarly, favorability is higher in 2008, before falling to its lowest in 2020 - this is interesting because the democrats got elected this year. 
+
+
+### Run all six models (full sample)
+
+Repeating the analysis above, we can run all six models as follows.
+
+
+Setup:
+
+```{r}
+# Remove "year" and "years" from all DTMs to avoid model matrix conflicts
+remove_terms <- c("year", "years")
+
+dtm.dem.stem  <- dtm.dem.stem[,  !colnames(dtm.dem.stem)  %in% remove_terms]
+dtm.dem.ngram <- dtm.dem.ngram[, !colnames(dtm.dem.ngram) %in% remove_terms]
+dtm.dem.skip  <- dtm.dem.skip[,  !colnames(dtm.dem.skip)  %in% remove_terms]
+dtm.rep.stem  <- dtm.rep.stem[,  !colnames(dtm.rep.stem)  %in% remove_terms]
+dtm.rep.ngram <- dtm.rep.ngram[, !colnames(dtm.rep.ngram) %in% remove_terms]
+dtm.rep.skip  <- dtm.rep.skip[,  !colnames(dtm.rep.skip)  %in% remove_terms]
+
+
+# Model specifications and storage
+valid_years <- c("2008", "2012", "2020", "2024")
+
+model_specs <- list(
+  list(name = "1a_dem_stem",  dtm = dtm.dem.stem,  data = data.dem.tm, outcome = "dem_therm_cat"),
+  list(name = "1b_dem_ngram", dtm = dtm.dem.ngram, data = data.dem.tm, outcome = "dem_therm_cat"),
+  list(name = "1c_dem_skip",  dtm = dtm.dem.skip,  data = data.dem.tm, outcome = "dem_therm_cat"),
+  list(name = "2a_rep_stem",  dtm = dtm.rep.stem,  data = data.rep.tm, outcome = "rep_therm_cat"),
+  list(name = "2b_rep_ngram", dtm = dtm.rep.ngram, data = data.rep.tm, outcome = "rep_therm_cat"),
+  list(name = "2c_rep_skip",  dtm = dtm.rep.skip,  data = data.rep.tm, outcome = "rep_therm_cat")
+)
+
+all_results <- list()
+```
+
+Then we can join the datasets and design the sparse model matrices:
+
+```{r}
+for (spec in model_specs) {
+  cat("\n=== Building data:", spec$name, "===\n")
+  
+  dtm_mat <- as.matrix(spec$dtm)
+  outcome_vec <- as.factor(spec$data[[spec$outcome]])
+  
+  model_data <- data.frame(
+    outcome = outcome_vec,
+    year    = as.factor(spec$data$year),
+    dtm_mat
+  ) %>%
+    filter(!is.na(outcome)) %>%
+    filter(year %in% valid_years) %>%
+    mutate(year = droplevels(year))
+  
+  X <- sparse.model.matrix(outcome ~ ., data = model_data)[, -1]
+  year_cols <- grep("^year", colnames(X))
+  penalty <- rep(1, ncol(X))
+  penalty[year_cols] <- 0
+  
+  cat("Sample size:", nrow(model_data), "\n")
+  cat("Year dummies:", colnames(X)[year_cols], "\n")
+  cat("Outcome distribution:\n")
+  print(prop.table(table(model_data$outcome)) |> round(3))
+  
+  all_results[[spec$name]] <- list(
+    X          = X,
+    y          = model_data$outcome,
+    penalty    = penalty,
+    model_data = model_data
+  )
+}
+```
+
+As before, the outcome variable distributions match the outcome data we joined on. Next we can run LASSO, cacheing to avoid time-consuming re-runs.
+
+```{r}
+for (spec in model_specs) {
+  cat("\n=== LASSO:", spec$name, "===\n")
+  
+  set.seed(5710)
+  lasso_fit <- cv.glmnet(
+    x              = all_results[[spec$name]]$X,
+    y              = all_results[[spec$name]]$y,
+    alpha          = 0.99,
+    family         = "multinomial",
+    type.measure   = "class",
+    penalty.factor = all_results[[spec$name]]$penalty
+  )
+  
+  cat("lambda.1se:", lasso_fit$lambda.1se, "\n")
+  cat("lambda.min:", lasso_fit$lambda.min, "\n")
+  
+  all_results[[spec$name]]$lasso <- lasso_fit
+  all_results[[spec$name]]$coefs <- coef(lasso_fit, s = "lambda.1se")
+}
+
+# Save after LASSO — so we don't have to rerun if R crashes
+save(all_results, file = "data/lasso_results_setA.RData")
+```
+
+We can then view the results
+
+```{r}
+for (spec in model_specs) {
+  cat("\n============================================================\n")
+  cat("Results:", spec$name, "\n")
+  cat("============================================================\n")
+  
+  coefs <- all_results[[spec$name]]$coefs
+  
+  coef_df <- lapply(1:5, function(k) {
+    cc <- coefs[[k]]
+    idx <- which(cc != 0)
+    terms <- rownames(cc)[idx]
+    vals <- as.numeric(cc)[idx]
+    keep <- !grepl("^\\(Intercept\\)", terms)
+    data.frame(
+      term    = terms[keep],
+      coef    = vals[keep],
+      class   = k,
+      model   = spec$name,
+      is_year = grepl("^year", terms[keep])
+    )
+  }) |> bind_rows()
+  
+  text_terms <- coef_df |> filter(!is_year)
+  cat("Unique text terms selected:", length(unique(text_terms$term)), "\n")
+  cat("Terms per class:\n")
+  text_terms |> count(class) |> print()
+  
+  cat("\n--- Top 10 animosity predictors (Class 1) ---\n")
+  text_terms |> filter(class == 1) |> arrange(desc(coef)) |> head(10) |> print()
+  
+  cat("\n--- Top 10 favorability predictors (Class 5) ---\n")
+  text_terms |> filter(class == 5) |> arrange(desc(coef)) |> head(10) |> print()
+  
+  cat("\n--- Year fixed effects (Class 1 — animosity) ---\n")
+  coef_df |> filter(is_year, class == 1) |> arrange(term) |> print()
+  
+  all_results[[spec$name]]$coef_df <- coef_df
+}
+
+# Save final results with coef_df included
+save(all_results, file = "data/lasso_results_setA.RData")
+cat("\nAll 6 models complete. Results saved.\n")
+
+```
+
+The dem n-gram results are comparable to the stem results we looked at earlier. The dem skip grams are also similar, though it is now interesting to see "power" as a term under negativity. The year fixed effects are also consistent. 
+
+For the republican stem results, there are affect, identity or sentiment based words ("racist", "hate", "Trump", "religion", "power" - interesting this comes up for both parties, "corporations", "lie") with "climate" being the main policy term - though "religion" and "corporations" could also be understood as policy-adjacent, as could "Trump" - given negative affect may be linked to this his policies. The "n-grams" adds a couple of other identity-based terms: "poor", "white", and a policy-based term: "rights". The Republican skip-gram also includes "big business" which is an interesting and more sophisticated inclusion, though semantically similar to "corporations".
+
+Overall picture looks like this:
+
+- Democrat animosity due to due identity and trait terms ("lie", "socialist", "everything" "nothing") and immigration/crime policy ("border", "illegal", "crime"), consistent with trait-based and issue-based explanations. 
+
+- Republican animosity may skew more affect ("racist", "hate") and identity-based ("Trump", "white", "religious"), including economic class ("wealthy", "corporations", "big business", "poor").
+
+We should be careful in intepreting this at this stage though!
+
+Also, **Republican animosity continues to increase over time.**
+
+On favorability:
+
+- Democrats favored for values ("fair", "equal", "inclusive", "common", "care")
+- Republicans favored for national identity and ruled-based values ("border", "America", "freedom", "law", "constitution")
+
+Climate is a wedge issue - a top area of animosity for Republicans, and favorability for Democrats. 
+
+
+## Relaxed LASSO
+
+We then run the relaxed LASSO (logistic regression) with clustered SEs as requested. Setup as follows:
+
+
+```{r}
+stripGlmLR <- function(cm) {
+  cm$y = c(); cm$model = c(); cm$residuals = c()
+  cm$fitted.values = c(); cm$effects = c(); cm$qr$qr = c()
+  cm$linear.predictors = c(); cm$weights = c()
+  cm$prior.weights = c(); cm$data = c()
+  cm$family$variance = c(); cm$family$dev.resids = c()
+  cm$family$aic = c(); cm$family$validmu = c()
+  cm$family$simulate = c()
+  attr(cm$terms, ".Environment") = c()
+  attr(cm$formula, ".Environment") = c()
+  cm
+}
+
+
+```
+
+Build the glm datasets using the terms selected by LASSO:
+
+```{r}
+for (spec in model_specs) {
+  cat("\n=== Building GLM data:", spec$name, "===\n")
+  
+  coefs      <- all_results[[spec$name]]$coefs
+  model_data <- all_results[[spec$name]]$model_data
+  X_full     <- as.matrix(all_results[[spec$name]]$X)
+  
+  # Selected terms from LASSO (text + year, excluding intercept)
+  selected_terms <- unique(unlist(lapply(coefs, function(cc) {
+    terms <- rownames(cc)[which(cc != 0)]
+    terms[!grepl("^\\(Intercept\\)", terms)]
+  })))
+  
+  # Keep only columns that exist in X
+  keep_cols <- selected_terms[selected_terms %in% colnames(X_full)]
+  cat("Terms passed to GLM:", length(keep_cols), "\n")
+  
+  train_glm <- data.frame(
+    outcome = model_data$outcome,
+    X_full[, keep_cols]
+  )
+  
+  all_results[[spec$name]]$train_glm <- train_glm
+}
+
+```
+
+Fit the relaxed LASSO model, again cacheing to save re-running:
+
+```{r}
+for (spec in model_specs) {
+  cat("\n=== Fitting relaxed GLM:", spec$name, "===\n")
+  
+  train_glm  <- all_results[[spec$name]]$train_glm
+  model_data <- all_results[[spec$name]]$model_data
+  
+  # Fit multinomial logistic regression
+  glm_fit <- multinom(outcome ~ ., data = train_glm, 
+                      maxit = 200, trace = FALSE)
+  
+  cat("Reference class (dropped):", levels(train_glm$outcome)[1], "\n")
+  cat("Classes modeled:", rownames(coef(glm_fit)), "\n")
+  
+  # Clustered SEs by year - could not be implemented:
+  # "Error in UseMethod("estfun") :"
+  # no applicable method for 'estfun' applied to an object of class "c('multinom', 'nnet')"
+  # vcov_cl  <- sandwich::vcovCL(glm_fit, cluster = ~model_data$year)
+  coef_mat <- coef(glm_fit)
+  # se_mat   <- sqrt(matrix(diag(vcov_cl), nrow = nrow(coef_mat)))
+  se_mat   <- summary(glm_fit)$standard.errors
+  z_mat    <- coef_mat / se_mat
+  p_mat    <- 2 * (1 - pnorm(abs(z_mat)))
+  
+  # Store trimmed GLM + inference
+  all_results[[spec$name]]$glm      <- stripGlmLR(glm_fit)
+  # all_results[[spec$name]]$vcov_cl  <- vcov_cl
+  all_results[[spec$name]]$coef_mat <- coef_mat
+  all_results[[spec$name]]$se_mat   <- se_mat
+  all_results[[spec$name]]$z_mat    <- z_mat
+  all_results[[spec$name]]$p_mat    <- p_mat
+  
+  cat("Done:", spec$name, "\n")
+}
+
+# Save after fitting — don't lose this if R crashes
+save(all_results, file = "data/lasso_results_setA.RData")
+```
+Note - this took over an hour to run, we should be selective / strategic on how we do future model runs. 
+
+Then we summarize the results:
+
+```{r}
+for (spec in model_specs) {
+  cat("\n============================================================\n")
+  cat("GLM results:", spec$name, "\n")
+  cat("============================================================\n")
+  
+  coef_mat <- all_results[[spec$name]]$coef_mat
+  se_mat   <- all_results[[spec$name]]$se_mat
+  z_mat    <- all_results[[spec$name]]$z_mat
+  p_mat    <- all_results[[spec$name]]$p_mat
+  
+  # For each modeled class, show top 10 significant predictors
+  for (k in rownames(coef_mat)) {
+    coefs_k <- coef_mat[k, ]
+    se_k    <- se_mat[k, ]
+    z_k     <- z_mat[k, ]
+    p_k     <- p_mat[k, ]
+    
+    df <- data.frame(
+      term = names(coefs_k),
+      coef = round(coefs_k, 3),
+      se   = round(se_k, 3),
+      z    = round(z_k, 3),
+      p    = round(p_k, 3)
+    ) %>%
+      filter(!grepl("^\\(Intercept\\)|^year", term)) %>%
+      arrange(desc(abs(coef))) %>%
+      head(10)
+    
+    cat("\n--- Class", k, "vs. reference (Class 1) ---\n")
+    print(df)
+  }
+}
+
+
+
+```
+
+## Extract key terms for manual coding
+
+After running these models, we will extract the top 25 terms of animosity for both parties, and then save these to a csv.
+
+```{r}
+# Top 25 animosity terms for manual coding
+cat("=== TOP 25 ANIMOSITY TERMS: DEMOCRAT (Model 1a) ===\n")
+all_results[["1a_dem_stem"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>%
+  head(25) %>%
+  select(term, coef) %>%
+  print()
+
+cat("\n=== TOP 25 ANIMOSITY TERMS: REPUBLICAN (Model 2a) ===\n")
+all_results[["2a_rep_stem"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>%
+  head(25) %>%
+  select(term, coef) %>%
+  print()
+
+
+# Save to a CSV
+
+coding_list <- bind_rows(
+  all_results[["1a_dem_stem"]]$coef_df %>%
+    filter(class == 1, !is_year) %>%
+    arrange(desc(coef)) %>%
+    head(25) %>%
+    mutate(party = "Democrat"),
+  all_results[["2a_rep_stem"]]$coef_df %>%
+    filter(class == 1, !is_year) %>%
+    arrange(desc(coef)) %>%
+    head(25) %>%
+    mutate(party = "Republican")
+) %>%
+  select(party, term, coef) %>%
+  mutate(
+    trait_vs_issue = "",   # to be coded: "trait", "issue", or "other"
+    coder = ""             # coder initials
+  )
+
+write_csv(coding_list, "data/animosity_coding_list.csv")
+cat("Coding list saved to data/animosity_coding_list.csv\n")
+```
+
+## Robustness checks
+
+### Partisan stratification
+
+Check partisan split availability:
+
+```{r}
+table(data.dem.tm$pid7, useNA = "always")
+table(data.rep.tm$pid7, useNA = "always")
+```
+
+Small number of N/As we can just filter out. Then we can 
+
+```{r}
+
+data.dem.rep <- data.dem.tm %>% filter(pid7 >= 5)
+# Democrats rating Republicans (pid7 <= 3)
+data.rep.dem <- data.rep.tm %>% filter(pid7 <= 3)
+
+cat("Republican raters of Dems:", nrow(data.dem.rep), "\n")
+cat("Democrat raters of Reps:", nrow(data.rep.dem), "\n")
+
+```
+
+We then run the LASSO as before. First set up the LASSO:
+
+
+```{r}
+robust_specs_partisan <- list(
+  list(name = "R1_dem_rep",
+       dtm     = dtm.dem.skip,
+       data    = data.dem.tm %>% filter(pid7 >= 5),
+       outcome = "dem_therm_cat"),
+  list(name = "R2_rep_dem",
+       dtm     = dtm.rep.skip,
+       data    = data.rep.tm %>% filter(pid7 <= 3),
+       outcome = "rep_therm_cat")
+)
+
+robust_results <- list()
+```
+
+
+Build the dtm and sparse model matrices:
+
+
+```{r}
+for (spec in robust_specs_partisan) {
+  cat("\n=== Building data:", spec$name, "===\n")
+  
+  # Use full DTM and full text mining dataset
+  if (spec$outcome == "dem_therm_cat") {
+    full_data <- data.dem.tm
+    full_dtm  <- dtm.dem.skip
+  } else {
+    full_data <- data.rep.tm
+    full_dtm  <- dtm.rep.skip
+  }
+  
+  # Build full model data first
+  dtm_mat <- as.matrix(full_dtm)
+  
+  model_data <- data.frame(
+    outcome = as.factor(full_data[[spec$outcome]]),
+    year    = as.factor(full_data$year),
+    pid7    = full_data$pid7,
+    dtm_mat
+  ) %>%
+    filter(!is.na(outcome)) %>%
+    filter(year %in% valid_years) %>%
+    mutate(year = droplevels(year))
+  
+  # THEN apply partisan filter
+  if (spec$name == "R1_dem_rep") {
+    model_data <- model_data %>% filter(pid7 >= 5)  # Republicans rating Dems
+  } else if (spec$name == "R2_rep_dem") {
+    model_data <- model_data %>% filter(pid7 <= 3)  # Democrats rating Reps
+  }
+  
+  # Drop pid7 before model matrix
+  model_data <- model_data %>% select(-pid7)
+  
+  cat("Sample size:", nrow(model_data), "\n")
+  cat("Outcome distribution:\n")
+  print(prop.table(table(model_data$outcome)) |> round(3))
+  
+  X <- sparse.model.matrix(outcome ~ ., data = model_data)[, -1]
+  year_cols <- grep("^year", colnames(X))
+  penalty <- rep(1, ncol(X))
+  penalty[year_cols] <- 0
+  
+  robust_results[[spec$name]] <- list(
+    X          = X,
+    y          = model_data$outcome,
+    penalty    = penalty,
+    model_data = model_data
+  )
+}
+```
+This is going lead to substantively different outcomes because a far larger proportion are in class 1 (0-20 thermometer rating) as we'd expect and far fewer in higher thermometer rating. This may reduce LASSO's ability to distinguish between classes 2-5. Let's run a 5 class model for comparability with the full sample model - but we might want to reduce down to 2-3 classes later on.
+
+Lets run the model:
+
+```{r}
+# Run model with "deviance" instead of "class" due to class imbalance
+for (spec in robust_specs_partisan) {
+  cat("\n=== LASSO:", spec$name, "===\n")
+  
+  set.seed(5710)
+  lasso_fit <- cv.glmnet(
+    x              = robust_results[[spec$name]]$X,
+    y              = robust_results[[spec$name]]$y,
+    alpha          = 0.99,
+    family         = "multinomial",
+    type.measure   = "deviance",  # changed from "class"
+    penalty.factor = robust_results[[spec$name]]$penalty
+  )
+  
+  cat("lambda.1se:", lasso_fit$lambda.1se, "\n")
+  cat("lambda.min:", lasso_fit$lambda.min, "\n")
+  
+  coefs <- coef(lasso_fit, s = "lambda.1se")
+  
+  coef_df <- lapply(1:5, function(k) {
+    cc <- coefs[[k]]
+    idx <- which(cc != 0)
+    terms <- rownames(cc)[idx]
+    vals <- as.numeric(cc)[idx]
+    keep <- !grepl("^\\(Intercept\\)", terms)
+    data.frame(
+      term    = terms[keep],
+      coef    = vals[keep],
+      class   = k,
+      model   = spec$name,
+      is_year = grepl("^year", terms[keep])
+    )
+  }) |> bind_rows()
+  
+  robust_results[[spec$name]]$lasso   <- lasso_fit
+  robust_results[[spec$name]]$coef_df <- coef_df
+  
+  cat("Done:", spec$name, "\n")
+}
+
+save(robust_results, file = "data/lasso_results_robustness.RData")
+```
+Summarize results:
+
+```{r}
+
+for (spec in robust_specs_partisan) {
+  cat("Partisan stratification results:", spec$name, "\n")
+  
+  coef_df    <- robust_results[[spec$name]]$coef_df
+  text_terms <- coef_df |> filter(!is_year)
+  
+  cat("Unique text terms selected:", length(unique(text_terms$term)), "\n")
+  
+  cat("\n--- Top 10 animosity predictors (Class 1) ---\n")
+  text_terms |> filter(class == 1) |> arrange(desc(coef)) |> head(10) |> print()
+  
+  cat("\n--- Year fixed effects (Class 1) ---\n")
+  coef_df |> filter(is_year, class == 1) |> arrange(term) |> print()
+}
+```
+This yields semantically similar results to the full sample runs. 
+
+### Re-run with alternative outcome variable (dem_liking_cses and rep_liking_cses)
+
+Check data structure for the outcome variable:
+
+```{r}
+# Check dem_liking_cses and rep_liking_cses distributions
+summary(data$dem_liking_cses)
+summary(data$rep_liking_cses)
+
+# How many non-NA values?
+sum(!is.na(data$dem_liking_cses))
+sum(!is.na(data$rep_liking_cses))
+
+# Distribution — what scale is this?
+table(data$dem_liking_cses) |> head(20)
+table(data$rep_liking_cses) |> head(20)
+
+
+```
+
+We have missing values (96, 97, 98, and -1) to recode to N/As. And then we can similar recode to 5 classes matching the thermometer:
+
+```{r}
+# Recode CSES thermometers
+data <- data %>%
+  mutate(
+    dem_liking_cses = if_else(dem_liking_cses %in% c(-1, 96, 97, 98), 
+                               NA, dem_liking_cses),
+    rep_liking_cses = if_else(rep_liking_cses %in% c(-1, 98), 
+                               NA, rep_liking_cses)
+  )
+
+# Recode into 5 classes matching our thermometer coding
+# CSES scale is 0-10, so bands are: 0-1, 2-3, 4-6, 7-8, 9-10
+data <- data %>%
+  mutate(
+    dem_cses_cat = case_when(
+      dem_liking_cses <= 1  ~ 1L,  # highly unfavorable
+      dem_liking_cses <= 3  ~ 2L,  # unfavorable
+      dem_liking_cses <= 6  ~ 3L,  # neutral
+      dem_liking_cses <= 8  ~ 4L,  # favorable
+      dem_liking_cses <= 10 ~ 5L,  # highly favorable
+      .default = NA_integer_
+    ),
+    rep_cses_cat = case_when(
+      rep_liking_cses <= 1  ~ 1L,
+      rep_liking_cses <= 3  ~ 2L,
+      rep_liking_cses <= 6  ~ 3L,
+      rep_liking_cses <= 8  ~ 4L,
+      rep_liking_cses <= 10 ~ 5L,
+      .default = NA_integer_
+    )
+  )
+
+# Check distributions
+prop.table(table(data$dem_cses_cat)) |> round(3)
+prop.table(table(data$rep_cses_cat)) |> round(3)
+
+
+
+```
+
+Distributions for CSEs are more balanced across the subgroups. Less data in the tails. 
+
+We will then add these as outcome variables to the text mining subsets. 
+
+```{r}
+# Also add cses_cat to text mining subsets
+data.dem.tm <- data.dem.tm %>%
+  mutate(
+    dem_cses_cat = case_when(
+      dem_liking_cses %in% c(-1, 96, 97, 98) ~ NA_integer_,
+      dem_liking_cses <= 1  ~ 1L,
+      dem_liking_cses <= 3  ~ 2L,
+      dem_liking_cses <= 6  ~ 3L,
+      dem_liking_cses <= 8  ~ 4L,
+      dem_liking_cses <= 10 ~ 5L,
+      .default = NA_integer_
+    )
+  )
+
+data.rep.tm <- data.rep.tm %>%
+  mutate(
+    rep_cses_cat = case_when(
+      rep_liking_cses %in% c(-1, 98) ~ NA_integer_,
+      rep_liking_cses <= 1  ~ 1L,
+      rep_liking_cses <= 3  ~ 2L,
+      rep_liking_cses <= 6  ~ 3L,
+      rep_liking_cses <= 8  ~ 4L,
+      rep_liking_cses <= 10 ~ 5L,
+      .default = NA_integer_
+    )
+  )
+
+# Verify
+prop.table(table(data.dem.tm$dem_cses_cat)) |> round(3)
+prop.table(table(data.rep.tm$rep_cses_cat)) |> round(3)
+
+```
+
+Let's setup the LASSO:
+
+```{r}
+robust_specs_cses <- list(
+  list(name = "R3_dem_cses",
+       dtm     = dtm.dem.skip,
+       data    = data.dem.tm,
+       outcome = "dem_cses_cat"),
+  list(name = "R4_rep_cses",
+       dtm     = dtm.rep.skip,
+       data    = data.rep.tm,
+       outcome = "rep_cses_cat")
+)
+```
+
+Build the DTM and sparse model matrices:
+
+```{r}
+for (spec in robust_specs_cses) {
+  cat("\n=== Building data:", spec$name, "===\n")
+  
+  dtm_mat     <- as.matrix(spec$dtm)
+  outcome_vec <- as.factor(spec$data[[spec$outcome]])
+  
+  model_data <- data.frame(
+    outcome = outcome_vec,
+    year    = as.factor(spec$data$year),
+    dtm_mat
+  ) %>%
+    filter(!is.na(outcome)) %>%
+    filter(year %in% valid_years) %>%
+    mutate(year = droplevels(year))
+  
+  cat("Sample size:", nrow(model_data), "\n")
+  cat("Outcome distribution:\n")
+  print(prop.table(table(model_data$outcome)) |> round(3))
+  
+  X <- sparse.model.matrix(outcome ~ ., data = model_data)[, -1]
+  year_cols <- grep("^year", colnames(X))
+  penalty <- rep(1, ncol(X))
+  penalty[year_cols] <- 0
+  
+  robust_results[[spec$name]] <- list(
+    X          = X,
+    y          = model_data$outcome,
+    penalty    = penalty,
+    model_data = model_data
+  )
+}
+
+
+```
+
+Run LASSO:
+
+
+```{r}
+for (spec in robust_specs_cses) {
+  cat("\n=== LASSO:", spec$name, "===\n")
+  
+  set.seed(5710)
+  lasso_fit <- cv.glmnet(
+    x              = robust_results[[spec$name]]$X,
+    y              = robust_results[[spec$name]]$y,
+    alpha          = 0.99,
+    family         = "multinomial",
+    type.measure   = "class",
+    penalty.factor = robust_results[[spec$name]]$penalty
+  )
+  
+  cat("lambda.1se:", lasso_fit$lambda.1se, "\n")
+  
+  coefs <- coef(lasso_fit, s = "lambda.1se")
+  
+  coef_df <- lapply(1:5, function(k) {
+    cc <- coefs[[k]]
+    idx <- which(cc != 0)
+    terms <- rownames(cc)[idx]
+    vals <- as.numeric(cc)[idx]
+    keep <- !grepl("^\\(Intercept\\)", terms)
+    data.frame(
+      term    = terms[keep],
+      coef    = vals[keep],
+      class   = k,
+      model   = spec$name,
+      is_year = grepl("^year", terms[keep])
+    )
+  }) |> bind_rows()
+  
+  robust_results[[spec$name]]$lasso   <- lasso_fit
+  robust_results[[spec$name]]$coef_df <- coef_df
+  
+  cat("Done:", spec$name, "\n")
+}
+
+save(robust_results, file = "data/lasso_results_robustness.RData")
+```
+
+And present the results:
+
+```{r}
+for (spec in robust_specs_cses) {
+  cat("Alternative DV (CSES) results:", spec$name, "\n")
+  
+  coef_df    <- robust_results[[spec$name]]$coef_df
+  text_terms <- coef_df |> filter(!is_year)
+  
+  cat("Unique text terms selected:", length(unique(text_terms$term)), "\n")
+  
+  cat("\n--- Top 10 animosity predictors (Class 1) ---\n")
+  text_terms |> filter(class == 1) |> arrange(desc(coef)) |> head(10) |> print()
+  
+  cat("\n--- Top 10 favorability predictors (Class 5) ---\n")
+  text_terms |> filter(class == 5) |> arrange(desc(coef)) |> head(10) |> print()
+  
+  cat("\n--- Year fixed effects (Class 1) ---\n")
+  coef_df |> filter(is_year, class == 1) |> arrange(term) |> print()
+}
+```
+
+Again, the results are substantively similar - the top terms are consistent with the ones we see for the thermometer predictors. though we see some new words on the favorability predictors for Republicans (e.g., "military", "pro-life", "stand", "fight").
+
+
+# Visualization and outputs
+
+Run this chunk to load all results without re-running models
+
+```{r}
+
+load("data/lasso_results_setA.RData")
+load("data/lasso_results_robustness.RData")
+
+```
+
+
+### Class distribution table
+
+```{r viz_class_table, results='show'}
+
+class_labels <- c("1 - Highly unfavorable (0-19)",
+                  "2 - Unfavorable (20-39)",
+                  "3 - Neutral (40-59)",
+                  "4 - Favorable (60-79)",
+                  "5 - Highly favorable (80-97)")
+
+dem_dist <- prop.table(table(data$dem_therm_cat)) |> round(3)
+rep_dist <- prop.table(table(data$rep_therm_cat)) |> round(3)
+
+data.frame(
+  Class   = class_labels,
+  Dem_N   = as.integer(table(data$dem_therm_cat)),
+  Dem_Pct = paste0(round(100 * dem_dist, 1), "%"),
+  Rep_N   = as.integer(table(data$rep_therm_cat)),
+  Rep_Pct = paste0(round(100 * rep_dist, 1), "%")
+)
+
+knitr::kable(
+  data.frame(
+    Class   = class_labels,
+    Dem_N   = as.integer(table(data$dem_therm_cat)),
+    Dem_Pct = paste0(round(100 * dem_dist, 1), "%"),
+    Rep_N   = as.integer(table(data$rep_therm_cat)),
+    Rep_Pct = paste0(round(100 * rep_dist, 1), "%")
+  ),
+  caption = "Thermometer class distribution"
+)
+```
+
+### Response vs non-response
+
+```{r}
+data <- data %>%
+  mutate(
+    has_dem_text = as.logical(has_dem_text),
+    has_rep_text = as.logical(has_rep_text)
+  )
+
+data.frame(
+  Party         = c("Democrat", "Republican"),
+  Responded     = c(sum(data$has_dem_text), sum(data$has_rep_text)),
+  No_response   = c(sum(!data$has_dem_text), sum(!data$has_rep_text)),
+  Pct_responded = c(
+    paste0(round(100 * mean(data$has_dem_text), 1), "%"),
+    paste0(round(100 * mean(data$has_rep_text), 1), "%")
+  )
+)
+
+knitr::kable(
+  data.frame(
+    Party         = c("Democrat", "Republican"),
+    Responded     = c(sum(data$has_dem_text), sum(data$has_rep_text)),
+    No_response   = c(sum(!data$has_dem_text), sum(!data$has_rep_text)),
+    Pct_responded = c(
+      paste0(round(100 * mean(data$has_dem_text), 1), "%"),
+      paste0(round(100 * mean(data$has_rep_text), 1), "%")
+    )
+  ),
+  caption = "Open-ended response rates"
+)
+```
+
+## LASSO CV plots
+
+```{r}
+png("data/text_mining_output/viz_lasso_dem_skip.png", 
+    width = 800, height = 600, res = 150)
+par(mar = c(5, 4, 6, 2))
+plot(all_results[["1c_dem_skip"]]$lasso, 
+     main = "Democrat skip-grams -> dem_therm_cat")
+dev.off()
+
+png("data/text_mining_output/viz_lasso_rep_skip.png",
+    width = 800, height = 600, res = 150)
+par(mar = c(5, 4, 6, 2))
+plot(all_results[["2c_rep_skip"]]$lasso,
+     main = "Republican skip-grams -> rep_therm_cat")
+dev.off()
+```
+
+
+## Word clouds for LASSO predictors
+
+Democrat animosity:
+
+```{r}
+png("data/text_mining_output/viz_wc_dem_animosity.png", width = 800, height = 800, res = 150)
+terms <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 1, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "OrRd")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+```
+
+Democrat favorability
+
+```{r}
+png("data/text_mining_output/viz_wc_dem_favorability.png", width = 800, height = 800, res = 150)
+terms <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 5, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "Blues")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+```
+
+Republican animosity:
+
+```{r}
+png("data/text_mining_output/viz_wc_rep_animosity.png", width = 800, height = 800, res = 150)
+terms <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 1, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "OrRd")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+
+```
+
+Republican favorability:
+
+```{r}
+png("data/text_mining_output/viz_wc_rep_favorability.png", width = 800, height = 800, res = 150)
+terms <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 5, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "Blues")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+```
+
+## Year fixed effects chart
+
+
+```{r}
+year_fe <- bind_rows(
+  all_results[["1a_dem_stem"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Dem stems"),
+  all_results[["1b_dem_ngram"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Dem n-grams"),
+  all_results[["1c_dem_skip"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Dem skip-grams"),
+  all_results[["2a_rep_stem"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Rep stems"),
+  all_results[["2b_rep_ngram"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Rep n-grams"),
+  all_results[["2c_rep_skip"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Rep skip-grams")
+) %>%
+  mutate(year_val = as.integer(gsub("year", "", term))) %>%
+  select(model, year_val, coef) %>%
+  pivot_wider(names_from = year_val, values_from = coef) %>%
+  mutate(across(where(is.numeric), round, 3))
+
+print(year_fe)
+
+
+knitr::kable(year_fe, caption = "Year fixed effects on animosity (Class 1) — relative to 2008")
+
+```
+
+
+## Robustness check - partisan stratification
+
+
+```{r}
+
+dem_full <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Full sample")
+
+dem_partisan <- robust_results[["R1_dem_rep"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Republicans only")
+
+rep_full <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Full sample")
+
+rep_partisan <- robust_results[["R2_rep_dem"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Democrats only")
+
+p1 <- bind_rows(dem_full, dem_partisan) %>%
+  ggplot(aes(x = reorder(term, coef), y = coef, fill = sample)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("steelblue", "steelblue4")) +
+  labs(title = "Democrat animosity predictors",
+       x = "", y = "LASSO coefficient", fill = "") +
+  theme_minimal()
+
+p2 <- bind_rows(rep_full, rep_partisan) %>%
+  ggplot(aes(x = reorder(term, coef), y = coef, fill = sample)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("tomato", "tomato4")) +
+  labs(title = "Republican animosity predictors",
+       x = "", y = "LASSO coefficient", fill = "") +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2)
+ggsave("data/text_mining_output/viz_robustness_partisan.png",
+       arrangeGrob(p1, p2, ncol = 2),
+       width = 12, height = 6, dpi = 300)
+
+```
+
+
+## Robustness check 2 - alternate outcome variable (CSES)
+
+```{r}
+make_comparison_plot <- function(df1, df2, title, colors) {
+  bind_rows(df1, df2) %>%
+    ggplot(aes(x = reorder(term, coef), y = coef, fill = dv)) +
+    geom_col(position = "dodge") +
+    coord_flip() +
+    scale_fill_manual(values = colors) +
+    labs(title = title, x = "", y = "LASSO coefficient", fill = "DV") +
+    theme_minimal(base_size = 10)
+}
+
+dem_therm_1 <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+dem_cses_1 <- robust_results[["R3_dem_cses"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+dem_therm_5 <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+dem_cses_5 <- robust_results[["R3_dem_cses"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+rep_therm_1 <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+rep_cses_1 <- robust_results[["R4_rep_cses"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+rep_therm_5 <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+rep_cses_5 <- robust_results[["R4_rep_cses"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+p_da <- make_comparison_plot(dem_therm_1, dem_cses_1,
+                              "Dem animosity", c("steelblue", "steelblue4"))
+p_df <- make_comparison_plot(dem_therm_5, dem_cses_5,
+                              "Dem favorability", c("steelblue", "steelblue4"))
+p_ra <- make_comparison_plot(rep_therm_1, rep_cses_1,
+                              "Rep animosity", c("tomato", "tomato4"))
+p_rf <- make_comparison_plot(rep_therm_5, rep_cses_5,
+                              "Rep favorability", c("tomato", "tomato4"))
+
+grid.arrange(p_da, p_df, p_ra, p_rf, ncol = 2)
+ggsave("data/text_mining_output/viz_robustness_cses.png",
+       arrangeGrob(p_da, p_df, p_ra, p_rf, ncol = 2),
+       width = 12, height = 10, dpi = 300)
+
+ggsave("data/text_mining_output/viz_robustness_cses.png",
+       arrangeGrob(p_da, p_df, p_ra, p_rf, ncol = 2),
+       width = 12, height = 10, dpi = 300)
+
+```
+
+

@@ -1,0 +1,637 @@
+---
+title: "Predicting Open-Ended Response"
+author: "Group 15"
+output:
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = "hide", fig.width = 8, fig.height = 4,
+                      cache = TRUE, message = FALSE, warning = FALSE)
+options(scipen = 0, digits = 3)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmnet, coefplot, tidyverse, sandwich, lmtest)
+```
+
+\pagebreak
+
+# Question {-}
+
+> **What predicts having any likes/dislikes for either party?**
+> Who are we including/excluding in the open-ended sample?
+
+A respondent is **excluded** from the open-ended sample if either
+
+* they answered "No" to the like/dislike screener (`*_binary == 5`), **or**
+* they said "Yes" but provided no actual open-ended text (`*_binary == 1` *and*
+  the text field is `NA`).
+
+\pagebreak
+
+# Data prep
+
+```{r read}
+pacman::p_load(glmnet, coefplot, tidyverse, sandwich, lmtest)
+data <- read.csv("data/data.csv", header = TRUE, na.strings = c("", "NA"))
+dim(data)
+```
+
+## Recode the four outcomes
+
+For each like/dislike pair, the new 0/1 outcome is:
+
+* **1** if `*_binary == 1` AND the text field is non-empty (gave usable text)
+* **0** if `*_binary == 5` OR (`*_binary == 1` AND text is NA)
+* **NA** if `*_binary` itself is NA (drop these rows later)
+
+```{r recode-y}
+recode_y <- function(bin, text) {
+  text_present <- !is.na(text) & nchar(trimws(text)) > 0
+  y <- rep(NA_integer_, length(bin))
+  y[bin == 5]                  <- 0L
+  y[bin == 1 & !text_present]  <- 0L
+  y[bin == 1 &  text_present]  <- 1L
+  y
+}
+
+data$y_dem_like    <- recode_y(data$dem_like_binary,    data$dem_like)
+data$y_dem_dislike <- recode_y(data$dem_dislike_binary, data$dem_dislike)
+data$y_rep_like    <- recode_y(data$rep_like_binary,    data$rep_like)
+data$y_rep_dislike <- recode_y(data$rep_dislike_binary, data$rep_dislike)
+
+sapply(data[, c("y_dem_like","y_dem_dislike","y_rep_like","y_rep_dislike")],
+       table, useNA = "ifany")
+```
+
+## Drop columns that should never be predictors
+
+We drop:
+
+* IDs and the survey weight (not substantive predictors).
+* The raw outcome components.
+* `age_cohort` (collinear with `age`).
+* Items not asked every year (`understand_issue`, `too_complicated`,
+  `power_matters`, `dem_satis`) and items with high missingness
+  (`dem_liking_cses`, `rep_liking_cses`, `therm_lib`, `therm_consv`).
+  Keeping them would drop the analytic sample below 15,000 after `na.omit`.
+
+```{r drop}
+drop_cols <- c("caseid", "uniq_id", "weight",
+               "dem_like_binary", "dem_dislike_binary",
+               "rep_like_binary", "rep_dislike_binary",
+               "dem_like", "dem_dislike", "rep_like", "rep_dislike",
+               "age_cohort",
+               "understand_issue", "too_complicated",
+               "power_matters", "dem_satis",
+               "dem_liking_cses", "rep_liking_cses",
+               "therm_lib", "therm_consv")
+data <- data[, !(names(data) %in% drop_cols)]
+```
+
+## Collapse multi-level ordinals
+
+Per-level coefficients on 7-point scales are hard to read in a table, so we
+collapse them. Out-of-range codes (DK / RF / 0 / 9) fall through to `NA` and
+get dropped by `na.omit` later. The middle category is set as the reference
+so coefficients read as "vs moderates / independents."
+
+```{r collapse-ordinals}
+collapse_7pt <- function(x, labels) {
+  factor(dplyr::case_when(
+    x %in% 1:3 ~ labels[1],
+    x == 4     ~ labels[2],
+    x %in% 5:7 ~ labels[3],
+    TRUE       ~ NA_character_
+  ), levels = c(labels[2], labels[1], labels[3]))   # middle first = reference
+}
+
+data$pid7     <- collapse_7pt(data$pid7,     c("Dem", "Ind", "Rep"))
+data$ideology <- collapse_7pt(data$ideology, c("Lib", "Mod", "Con"))
+data$dem_ideo <- collapse_7pt(data$dem_ideo, c("Lib", "Mod", "Con"))
+data$rep_ideo <- collapse_7pt(data$rep_ideo, c("Lib", "Mod", "Con"))
+
+data$educ7 <- factor(dplyr::case_when(
+  data$educ7 %in% 1:2 ~ "NoHS",
+  data$educ7 %in% 3:5 ~ "HS_SomeCol",
+  data$educ7 %in% 6:7 ~ "BA_plus",
+  TRUE                ~ NA_character_
+), levels = c("HS_SomeCol", "NoHS", "BA_plus"))   # HS = reference
+```
+
+## Make `year` a factor and convert remaining categoricals
+
+```{r factors}
+data$year <- factor(data$year)
+
+cont_vars <- c("age", "dem_therm", "rep_therm")
+y_vars    <- c("y_dem_like", "y_dem_dislike", "y_rep_like", "y_rep_dislike")
+cat_vars  <- setdiff(names(data), c(cont_vars, y_vars, "year"))
+
+# already-factor columns pass through unchanged; numeric ones get factored
+data[cat_vars] <- lapply(data[cat_vars],
+                         function(z) if (is.factor(z)) z else factor(z))
+```
+
+## Listwise-delete missing predictors
+
+```{r na-omit, results = TRUE}
+data_full <- na.omit(data)
+dim(data_full)
+
+# Every outcome should have both 0s and 1s, every year should have substantial counts.
+cat("\nClass distribution of each outcome:\n")
+for (y in y_vars) {
+  cat(sprintf("  %-15s ", y)); print(table(data_full[[y]]))
+}
+cat("\nYear counts:\n"); print(table(data_full$year))
+```
+
+\pagebreak
+
+
+## Build X and Y
+
+```{r make-XY, results = TRUE}
+Y_dl <- data_full$y_dem_like
+
+# RHS = everything except the four outcomes
+rhs  <- setdiff(names(data_full), y_vars)
+form <- as.formula(paste("~", paste(rhs, collapse = " + ")))
+X    <- model.matrix(form, data = data_full)[, -1]   # drop intercept col
+dim(X)
+```
+
+## Force `year` in via `penalty.factor`
+
+```{r pf, results = TRUE}
+pf <- ifelse(grepl("^year", colnames(X)), 0, 1)
+sum(pf == 0)   # number of year dummies forced in (= 4 for 5 years)
+```
+
+## Run `cv.glmnet`
+
+```{r cv-dl, results = TRUE}
+set.seed(10)
+fit.dl.cv <- cv.glmnet(X, Y_dl,
+                       alpha          = 1,
+                       family         = "binomial",
+                       nfolds         = 10,
+                       penalty.factor = pf)
+plot(fit.dl.cv)
+fit.dl.cv$lambda.min
+fit.dl.cv$lambda.1se
+```
+
+## Extract selected variables at `lambda.1se`
+
+```{r coef-dl, results = TRUE}
+coef.dl <- extract.coef(fit.dl.cv, lambda = fit.dl.cv$lambda.1se)
+coef.dl
+var.dl  <- rownames(coef.dl)[-1]   # column names from model.matrix
+```
+
+## Refit with `glm` (relaxed LASSO) and apply clustered SEs
+
+`model.matrix` produces names like `pid7Rep`, `race_eth5`. We map them back
+to parent variable names to write the `glm` formula.
+
+```{r relaxed-dl, results = TRUE}
+parent_var <- function(cols, vars) {
+  hits <- sapply(cols, function(cn) {
+    m <- vars[startsWith(cn, vars)]
+    if (length(m)) m[which.max(nchar(m))] else NA_character_
+  })
+  unique(na.omit(hits))
+}
+
+vars.dl <- parent_var(var.dl, names(data_full))
+vars.dl <- union(vars.dl, "year")   # year is forced in regardless
+
+f.dl <- as.formula(paste("y_dem_like ~", paste(vars.dl, collapse = " + ")))
+fit.dl <- glm(f.dl, data = data_full, family = binomial)
+
+V.dl <- sandwich::vcovCL(fit.dl, cluster = ~ year, type = "HC1")
+coeftest(fit.dl, vcov. = V.dl)
+```
+
+\pagebreak
+
+# Loop over all four outcomes
+
+Same logic, wrapped in a function.
+
+```{r run-all, results = TRUE}
+run_one <- function(y_name, data_full, seed = 10) {
+  Y    <- as.numeric(data_full[[y_name]])
+  stopifnot(length(unique(Y)) == 2)   # fail loud if Y is constant
+
+  rhs  <- setdiff(names(data_full), y_vars)
+  form <- as.formula(paste("~", paste(rhs, collapse = " + ")))
+  X    <- model.matrix(form, data = data_full)[, -1]
+  pf   <- ifelse(grepl("^year", colnames(X)), 0, 1)
+
+  set.seed(seed)
+  cv <- cv.glmnet(X, Y, alpha = 1, family = "binomial",
+                  nfolds = 10, penalty.factor = pf)
+
+  coef.tab <- extract.coef(cv, lambda = cv$lambda.1se)
+  vars     <- parent_var(rownames(coef.tab)[-1], names(data_full))
+  vars     <- union(vars, "year")
+
+  f   <- as.formula(paste(y_name, "~", paste(vars, collapse = " + ")))
+  fit <- glm(f, data = data_full, family = binomial)
+  V   <- sandwich::vcovCL(fit, cluster = ~ year, type = "HC1")
+
+  list(cv = cv, fit = fit, vcov = V,
+       coef_test  = coeftest(fit, vcov. = V),
+       n          = nrow(data_full),
+       lambda_1se = cv$lambda.1se,
+       n_selected = nrow(coef.tab) - 1)
+}
+
+results <- lapply(y_vars, run_one, data_full = data_full)
+names(results) <- y_vars
+
+data.frame(outcome    = y_vars,
+           n          = sapply(results, `[[`, "n"),
+           lambda_1se = sapply(results, `[[`, "lambda_1se"),
+           n_selected = sapply(results, `[[`, "n_selected"))
+```
+
+```{r cv-plots, fig.height = 6}
+png("data/lasso_response_output/viz_cv_plots.png", width = 1200, height = 900, res = 150)
+par(mfrow = c(2, 2))
+for (y in y_vars) { plot(results[[y]]$cv); title(y, line = 2.5) }
+par(mfrow = c(1, 1))
+dev.off()
+```
+
+```{r print-tables, results = TRUE}
+for (y in y_vars) {
+  cat("\n----- ", y, " -----\n")
+  print(results[[y]]$coef_test)
+}
+```
+
+\pagebreak
+
+# Robustness check: pooled outcome
+
+A respondent is **in the open-ended sample** if they provided usable text on
+*any* of the four items. One binary outcome instead of four; if the same
+predictors fall out we have evidence the per-item models aren't picking up
+item-specific noise.
+
+```{r pooled, results = TRUE}
+data_full$y_pooled <- as.integer(
+  data_full$y_dem_like    == 1 |
+  data_full$y_dem_dislike == 1 |
+  data_full$y_rep_like    == 1 |
+  data_full$y_rep_dislike == 1
+)
+table(data_full$y_pooled, useNA = "ifany")
+
+Y_p   <- data_full$y_pooled
+rhs_p <- setdiff(names(data_full), c(y_vars, "y_pooled"))
+form_p <- as.formula(paste("~", paste(rhs_p, collapse = " + ")))
+X_p   <- model.matrix(form_p, data = data_full)[, -1]
+pf_p  <- ifelse(grepl("^year", colnames(X_p)), 0, 1)
+
+set.seed(10)
+fit.p.cv <- cv.glmnet(X_p, Y_p, alpha = 1, family = "binomial",
+                      nfolds = 10, penalty.factor = pf_p)
+plot(fit.p.cv)
+
+coef.p <- extract.coef(fit.p.cv, lambda = fit.p.cv$lambda.1se)
+coef.p
+
+vars.p <- parent_var(rownames(coef.p)[-1], names(data_full))
+vars.p <- union(vars.p, "year")
+
+f.p   <- as.formula(paste("y_pooled ~", paste(vars.p, collapse = " + ")))
+fit.p <- glm(f.p, data = data_full, family = binomial)
+V.p   <- sandwich::vcovCL(fit.p, cluster = ~ year, type = "HC1")
+coeftest(fit.p, vcov. = V.p)
+```
+
+\pagebreak
+
+# Summary
+Across all four per-item models and the pooled robustness check, four predictor families do most of the work.
+
+`y_dem_like` is the simplest model (15 predictors): partisanship, ideology placement, thermometers, and education explain who articulates Democratic likes.
+
+`y_dem_dislike` is the richest model (26 predictors), pulling in age, race, gender, marital status, and work status. Articulating dislike of Democrats appears to be more demographically structured than articulating likes.
+
+`y_rep_like` (14 predictors) is dominated by partisanship and ideology — demographics drop out almost entirely. Whether someone can articulate Republican likes is essentially a function of political engagement.
+
+`y_rep_dislike` (25 predictors) again brings in demographics, similar to y_dem_dislike.
+
+Below are some general findings -
+
+1. Education is the single most consistent variable. `educ7BA_plus` is positive and highly significant in all four per-item models and the pooled model, and `educ7NoHS` is consistently negative. Holding everything else constant, college-educated respondents are roughly 60% more likely (in odds-ratio terms) to provide usable open-ended text than the high-school-or-some-college reference group. 
+
+2. Partisan strength matters more than direction. Both `pid7Dem` and `pid7Rep` show positive coefficients in most models, indicating that identifying with either party (versus pure independents, the reference) predicts response. 
+
+3. Political knowledge / engagement variables are extremely strong. `party_diff2` ("yes there's a difference between the parties") has beta = 0.55–0.92 in every model — one of the largest selected effects. `party_more_consv2` (correctly identifying Republicans as more conservative) is also consistently positive. 
+
+Beyond education, demographics matter most for the dislike outcomes:
+
+1. Age is positive and significant for both dislike outcomes (beta = 0.013–0.016 per year): older respondents are more likely to articulate dislikes. It does not appear in either like model at lambda lse.
+
+2. Gender is selected in three of four models. Women (`gender2`) are slightly less likely to give open-ended responses than men; the "other" category (`gender3`) shows large effects in opposite directions across items, but the small cell size warrants caution.
+
+3. Race/ethnicity is selected for `y_dem_dislike` and `y_rep_dislike`. Asian (`race_eth3`) and Hispanic (`race_eth5`) respondents are consistently less likely to give open-ended responses than the white-non-Hispanic reference, all else equal.
+
+
+# Visualizations (RM)
+
+I will take Ying's work and create visualizations that are consistent format with the text mining work. I have also edited the code under the cross-validation plots to save pngs. All visualizations can be found at: "\data\lasso_response_output"
+
+## Response vs nonresponse rate
+
+```{r viz_response_rate, results='show', fig.width=8, fig.height=4}
+
+p_response <- ggplot(response_data, 
+                     aes(x = Item, y = Proportion, fill = Status)) +
+  geom_col(position = "stack", width = 0.4) +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            position = position_stack(vjust = 0.5),
+            size = 3.5, color = "white", fontface = "bold") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c("No response" = "gray80", 
+                                "Responded"   = "steelblue")) +
+  labs(title = "Response rates to open-ended questions on party favorability and animosity",
+       x = "", y = "Proportion", fill = "") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid = element_blank())
+
+p_response
+ggsave("data/lasso_response_output/viz_response_rate.png",
+       p_response, width = 8, height = 4, dpi = 300)
+```
+
+
+## Coefficient plots
+
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+
+# Function to extract clustered SE results as a tidy data frame
+tidy_coeftest <- function(ct, outcome_name) {
+  df <- data.frame(
+    term     = rownames(ct),
+    estimate = ct[, 1],
+    se       = ct[, 2],
+    z        = ct[, 3],
+    p        = ct[, 4],
+    row.names = NULL
+  ) %>%
+    filter(!grepl("^\\(Intercept\\)|^year", term)) %>%
+    mutate(
+      outcome = outcome_name,
+      lower   = estimate - 1.96 * se,
+      upper   = estimate + 1.96 * se,
+      sig     = ifelse(p < 0.05, "p < 0.05", "p >= 0.05")
+    )
+  df
+}
+
+# Extract all four models
+coef_all <- bind_rows(
+  tidy_coeftest(results[["y_dem_like"]]$coef_test,    "Dem likes"),
+  tidy_coeftest(results[["y_dem_dislike"]]$coef_test, "Dem dislikes"),
+  tidy_coeftest(results[["y_rep_like"]]$coef_test,    "Rep likes"),
+  tidy_coeftest(results[["y_rep_dislike"]]$coef_test, "Rep dislikes")
+)
+
+```
+
+Democrat outcomes coefficient plots:
+
+```{r}
+# Define predictor family groupings
+get_family <- function(term) {
+  case_when(
+    grepl("^pid7|^ideology|^dem_ideo|^rep_ideo", term) ~ "1_Partisanship/Ideology",
+    grepl("^party_diff|^party_more|^right_track", term) ~ "2_Political Engagement",
+    grepl("^dem_therm|^rep_therm", term) ~ "3_Thermometers",
+    grepl("^age|^gender|^race_eth|^educ7|^marital|^work_status|^health|^sexori|^amer_parents|^relg", term) ~ "4_Demographics",
+    grepl("^reg_census", term) ~ "5_Geography",
+    TRUE ~ "6_Other"
+  )
+}
+
+coef_all <- bind_rows(
+  tidy_coeftest(results[["y_dem_like"]]$coef_test,    "Dem likes"),
+  tidy_coeftest(results[["y_dem_dislike"]]$coef_test, "Dem dislikes"),
+  tidy_coeftest(results[["y_rep_like"]]$coef_test,    "Rep likes"),
+  tidy_coeftest(results[["y_rep_dislike"]]$coef_test, "Rep dislikes")
+) %>%
+  mutate(family = get_family(term))
+
+# Plot with family-based ordering
+p_dem <- coef_all %>%
+  filter(outcome %in% c("Dem likes", "Dem dislikes")) %>%
+  arrange(family, estimate) %>%
+  mutate(term = factor(term, levels = unique(term))) %>%
+  ggplot(aes(x = term, y = estimate,
+             color = sig, shape = sig)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_flip() +
+  facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("p < 0.05" = "steelblue",
+                                 "p >= 0.05" = "gray60")) +
+  scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.05" = 1)) +
+  labs(x = "", y = "Log-odds coefficient (clustered SE)",
+       color = "", shape = "") +
+  theme_minimal(base_size = 9) +
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(3, "cm"),
+    axis.text.y = element_text(size = 7.5),
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+p_dem
+ggsave("data/lasso_response_output/viz_dem_coefs.png",
+       p_dem, width = 14, height = 12, dpi = 300)
+```
+
+Republican outcomes coefficient plots:
+
+```{r}
+p_rep <- coef_all %>%
+  filter(outcome %in% c("Rep likes", "Rep dislikes")) %>%
+  arrange(family, estimate) %>%
+  mutate(term = factor(term, levels = unique(term))) %>%
+  ggplot(aes(x = term, y = estimate,
+             color = sig, shape = sig)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_flip() +
+  facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("p < 0.05" = "tomato",
+                                 "p >= 0.05" = "gray60")) +
+  scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.05" = 1)) +
+  labs(x = "", y = "Log-odds coefficient (clustered SE)",
+       color = "", shape = "") +
+  theme_minimal(base_size = 9) +
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(3, "cm"),
+    axis.text.y = element_text(size = 7.5),
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+p_rep
+ggsave("data/lasso_response_output/viz_rep_coefs.png",
+       p_rep, width = 14, height = 12, dpi = 300)
+
+
+
+
+```
+
+Filtered to only top 10 terms:
+
+```{r viz_coefs_top10, results='show', fig.width=12, fig.height=8}
+
+# Filter to top 10 significant terms by absolute coefficient, per outcome
+top10_coefs <- coef_all %>%
+  filter(sig == "p < 0.05") %>%
+  group_by(outcome) %>%
+  arrange(desc(abs(estimate))) %>%
+  slice_head(n = 10) %>%
+  ungroup()
+
+p_dem_top10 <- top10_coefs %>%
+  filter(outcome %in% c("Dem likes", "Dem dislikes")) %>%
+  mutate(term = reorder(term, estimate)) %>%
+  ggplot(aes(x = term, y = estimate, color = outcome, shape = outcome)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_flip() +
+  facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("Dem likes" = "steelblue", 
+                                 "Dem dislikes" = "steelblue4")) +
+  scale_shape_manual(values = c("Dem likes" = 16, "Dem dislikes" = 17)) +
+  labs(title = "Top predictors of Democrat open-ended response (significant terms only)",
+       x = "", y = "Log-odds coefficient (clustered SE)", 
+       color = "", shape = "") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none",
+        panel.spacing = unit(2, "cm"),
+        axis.text.y = element_text(size = 8),
+        strip.text = element_text(size = 10, face = "bold"))
+
+p_rep_top10 <- top10_coefs %>%
+  filter(outcome %in% c("Rep likes", "Rep dislikes")) %>%
+  mutate(term = reorder(term, estimate)) %>%
+  ggplot(aes(x = term, y = estimate, color = outcome, shape = outcome)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_flip() +
+  facet_wrap(~ outcome, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("Rep likes" = "tomato", 
+                                 "Rep dislikes" = "tomato4")) +
+  scale_shape_manual(values = c("Rep likes" = 16, "Rep dislikes" = 17)) +
+  labs(title = "Top predictors of Republican open-ended response (significant terms only)",
+       x = "", y = "Log-odds coefficient (clustered SE)", 
+       color = "", shape = "") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none",
+        panel.spacing = unit(2, "cm"),
+        axis.text.y = element_text(size = 8),
+        strip.text = element_text(size = 10, face = "bold"))
+
+p_dem_top10
+p_rep_top10
+
+ggsave("data/lasso_response_output/viz_dem_coefs_top10.png",
+       p_dem_top10, width = 12, height = 6, dpi = 300)
+ggsave("data/lasso_response_output/viz_rep_coefs_top10.png",
+       p_rep_top10, width = 12, height = 6, dpi = 300)
+
+```
+
+## Year fixed effects
+
+```{r}
+# Extract year fixed effects from all four models
+year_fe_ying <- bind_rows(
+  lapply(y_vars, function(y) {
+    ct <- results[[y]]$coef_test
+    df <- data.frame(
+      term     = rownames(ct),
+      estimate = ct[, 1],
+      se       = ct[, 2],
+      z        = ct[, 3],
+      p        = ct[, 4],
+      row.names = NULL
+    ) %>%
+      filter(grepl("^year", term)) %>%
+      mutate(
+        outcome = y,
+        term    = gsub("year", "", term),  # clean to just the year number
+        stars   = case_when(
+          p < 0.001 ~ "***",
+          p < 0.01  ~ "**",
+          p < 0.05  ~ "*",
+          TRUE      ~ ""
+        ),
+        coef_fmt = paste0(round(estimate, 3), stars)
+      )
+  })
+) %>%
+  select(outcome, term, coef_fmt) %>%
+  pivot_wider(names_from = term, values_from = coef_fmt) %>%
+  rename(Outcome = outcome)
+
+knitr::kable(year_fe_ying, 
+             caption = "Year fixed effects — response models (ref = 2008, clustered SE)")
+```
+
+## Robustness check
+
+
+```{r}
+tidy_coeftest(coeftest(fit.p, vcov. = V.p), "Pooled") %>%
+  ggplot(aes(x = reorder(term, estimate), y = estimate,
+             color = sig, shape = sig)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_flip() +
+  scale_color_manual(values = c("p < 0.05" = "darkgreen",
+                                 "p >= 0.05" = "gray60")) +
+  scale_shape_manual(values = c("p < 0.05" = 16, "p >= 0.05" = 1)) +
+  labs(x = "", y = "Log-odds coefficient (clustered SE)",
+       color = "", shape = "",
+       title = "Pooled outcome robustness check") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom") -> p_pooled
+
+p_pooled
+ggsave("data/lasso_response_output/viz_pooled_coefs.png",
+       p_pooled, width = 8, height = 7, dpi = 300)
+```
+
+
