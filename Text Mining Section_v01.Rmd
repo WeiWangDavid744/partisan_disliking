@@ -909,11 +909,11 @@ We then run the LASSO as before. First set up the LASSO:
 ```{r}
 robust_specs_partisan <- list(
   list(name = "R1_dem_rep",
-       dtm     = dtm.dem.stem,
+       dtm     = dtm.dem.skip,
        data    = data.dem.tm %>% filter(pid7 >= 5),
        outcome = "dem_therm_cat"),
   list(name = "R2_rep_dem",
-       dtm     = dtm.rep.stem,
+       dtm     = dtm.rep.skip,
        data    = data.rep.tm %>% filter(pid7 <= 3),
        outcome = "rep_therm_cat")
 )
@@ -932,10 +932,10 @@ for (spec in robust_specs_partisan) {
   # Use full DTM and full text mining dataset
   if (spec$outcome == "dem_therm_cat") {
     full_data <- data.dem.tm
-    full_dtm  <- dtm.dem.stem
+    full_dtm  <- dtm.dem.skip
   } else {
     full_data <- data.rep.tm
-    full_dtm  <- dtm.rep.stem
+    full_dtm  <- dtm.rep.skip
   }
   
   # Build full model data first
@@ -1151,11 +1151,11 @@ Let's setup the LASSO:
 ```{r}
 robust_specs_cses <- list(
   list(name = "R3_dem_cses",
-       dtm     = dtm.dem.stem,
+       dtm     = dtm.dem.skip,
        data    = data.dem.tm,
        outcome = "dem_cses_cat"),
   list(name = "R4_rep_cses",
-       dtm     = dtm.rep.stem,
+       dtm     = dtm.rep.skip,
        data    = data.rep.tm,
        outcome = "rep_cses_cat")
 )
@@ -1267,5 +1267,340 @@ for (spec in robust_specs_cses) {
 ```
 
 Again, the results are substantively similar - the top terms are consistent with the ones we see for the thermometer predictors. though we see some new words on the favorability predictors for Republicans (e.g., "military", "pro-life", "stand", "fight").
+
+
+# Visualization and outputs
+
+Run this chunk to load all results without re-running models
+
+```{r}
+
+load("data/lasso_results_setA.RData")
+load("data/lasso_results_robustness.RData")
+
+```
+
+
+## Thermometer distributions
+
+### CDF plots
+
+```{r viz_cdf, results='show', fig.width=10, fig.height=5}
+png("data/viz_cdf.png", width = 1200, height = 600, res = 150)
+par(mfrow = c(1,2))
+plot(ecdf(data$dem_therm),
+     main = "CDF: Democrat Thermometer",
+     xlab = "Feeling (0-100)", ylab = "Cumulative Proportion",
+     col = "steelblue", lwd = 2, verticals = TRUE, do.points = FALSE)
+abline(v = c(20, 40, 60, 80), col = "gray", lty = 2)
+abline(h = 0.5, col = "red", lty = 2)
+plot(ecdf(data$rep_therm),
+     main = "CDF: Republican Thermometer",
+     xlab = "Feeling (0-100)", ylab = "Cumulative Proportion",
+     col = "tomato", lwd = 2, verticals = TRUE, do.points = FALSE)
+abline(v = c(20, 40, 60, 80), col = "gray", lty = 2)
+abline(h = 0.5, col = "red", lty = 2)
+par(mfrow = c(1,1))
+dev.off()
+```
+
+### Class distribution table
+
+```{r viz_class_table, results='show'}
+
+class_labels <- c("1 - Highly unfavorable (0-19)",
+                  "2 - Unfavorable (20-39)",
+                  "3 - Neutral (40-59)",
+                  "4 - Favorable (60-79)",
+                  "5 - Highly favorable (80-97)")
+
+dem_dist <- prop.table(table(data$dem_therm_cat)) |> round(3)
+rep_dist <- prop.table(table(data$rep_therm_cat)) |> round(3)
+
+data.frame(
+  Class   = class_labels,
+  Dem_N   = as.integer(table(data$dem_therm_cat)),
+  Dem_Pct = paste0(round(100 * dem_dist, 1), "%"),
+  Rep_N   = as.integer(table(data$rep_therm_cat)),
+  Rep_Pct = paste0(round(100 * rep_dist, 1), "%")
+)
+
+knitr::kable(
+  data.frame(
+    Class   = class_labels,
+    Dem_N   = as.integer(table(data$dem_therm_cat)),
+    Dem_Pct = paste0(round(100 * dem_dist, 1), "%"),
+    Rep_N   = as.integer(table(data$rep_therm_cat)),
+    Rep_Pct = paste0(round(100 * rep_dist, 1), "%")
+  ),
+  caption = "Thermometer class distribution"
+)
+```
+
+### Response vs non-response
+
+```{r}
+data <- data %>%
+  mutate(
+    has_dem_text = as.logical(has_dem_text),
+    has_rep_text = as.logical(has_rep_text)
+  )
+
+data.frame(
+  Party         = c("Democrat", "Republican"),
+  Responded     = c(sum(data$has_dem_text), sum(data$has_rep_text)),
+  No_response   = c(sum(!data$has_dem_text), sum(!data$has_rep_text)),
+  Pct_responded = c(
+    paste0(round(100 * mean(data$has_dem_text), 1), "%"),
+    paste0(round(100 * mean(data$has_rep_text), 1), "%")
+  )
+)
+
+knitr::kable(
+  data.frame(
+    Party         = c("Democrat", "Republican"),
+    Responded     = c(sum(data$has_dem_text), sum(data$has_rep_text)),
+    No_response   = c(sum(!data$has_dem_text), sum(!data$has_rep_text)),
+    Pct_responded = c(
+      paste0(round(100 * mean(data$has_dem_text), 1), "%"),
+      paste0(round(100 * mean(data$has_rep_text), 1), "%")
+    )
+  ),
+  caption = "Open-ended response rates"
+)
+```
+
+## LASSO CV splots
+
+```{r}
+png("data/viz_lasso_dem_stem.png", width = 800, height = 600, res = 150)
+par(mar = c(5, 4, 6, 2))
+plot(all_results[["1a_dem_stem"]]$lasso, main = "Democrat stems -> dem_therm_cat")
+dev.off()
+
+png("data/viz_lasso_rep_stem.png", width = 800, height = 600, res = 150)
+par(mar = c(5, 4, 6, 2))
+plot(all_results[["2a_rep_stem"]]$lasso, main = "Republican stems -> rep_therm_cat")
+dev.off()
+
+png("data/viz_lasso_dem_ngram.png", width = 800, height = 600, res = 150)
+par(mar = c(5, 4, 6, 2))
+plot(all_results[["1b_dem_ngram"]]$lasso, main = "Democrat n-grams -> dem_therm_cat")
+dev.off()
+
+png("data/viz_lasso_rep_ngram.png", width = 800, height = 600, res = 150)
+par(mar = c(5, 4, 6, 2))
+plot(all_results[["2b_rep_ngram"]]$lasso, main = "Republican n-grams -> rep_therm_cat")
+dev.off()
+```
+
+
+## Word clouds for LASSO predictors
+
+Democrat animosity:
+
+```{r}
+png("data/viz_wc_dem_animosity.png", width = 800, height = 800, res = 150)
+terms <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 1, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "OrRd")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+```
+
+Democrat favorability
+
+```{r}
+png("data/viz_wc_dem_favorability.png", width = 800, height = 800, res = 150)
+terms <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 5, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "Blues")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+```
+
+Republican animosity:
+
+```{r}
+png("data/viz_wc_rep_animosity.png", width = 800, height = 800, res = 150)
+terms <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 1, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "OrRd")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+
+```
+
+Republican favorability:
+
+```{r}
+png("data/viz_wc_rep_favorability.png", width = 800, height = 800, res = 150)
+terms <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 5, !is_year, coef > 0) %>%
+  arrange(desc(coef)) %>% head(25)
+wordcloud(terms$term, terms$coef,
+          colors = brewer.pal(8, "Blues")[3:8],
+          ordered.colors = FALSE, scale = c(3, 0.4),
+          min.freq = 0, random.order = FALSE)
+dev.off()
+```
+
+## Year fixed effects chart
+
+
+```{r}
+year_fe <- bind_rows(
+  all_results[["1a_dem_stem"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Dem stems"),
+  all_results[["1b_dem_ngram"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Dem n-grams"),
+  all_results[["1c_dem_skip"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Dem skip-grams"),
+  all_results[["2a_rep_stem"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Rep stems"),
+  all_results[["2b_rep_ngram"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Rep n-grams"),
+  all_results[["2c_rep_skip"]]$coef_df %>%
+    filter(is_year, class == 1) %>% mutate(model = "Rep skip-grams")
+) %>%
+  mutate(year_val = as.integer(gsub("year", "", term))) %>%
+  select(model, year_val, coef) %>%
+  pivot_wider(names_from = year_val, values_from = coef) %>%
+  mutate(across(where(is.numeric), round, 3))
+
+print(year_fe)
+
+
+knitr::kable(year_fe, caption = "Year fixed effects on animosity (Class 1) — relative to 2008")
+
+```
+
+
+## Robustness check - partisan stratification
+
+
+```{r}
+
+library(gridExtra)
+
+dem_full <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Full sample")
+
+dem_partisan <- robust_results[["R1_dem_rep"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Republicans only")
+
+rep_full <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Full sample")
+
+rep_partisan <- robust_results[["R2_rep_dem"]]$coef_df %>%
+  filter(class == 1, !is_year) %>%
+  arrange(desc(coef)) %>% head(10) %>%
+  mutate(sample = "Democrats only")
+
+p1 <- bind_rows(dem_full, dem_partisan) %>%
+  ggplot(aes(x = reorder(term, coef), y = coef, fill = sample)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("steelblue", "steelblue4")) +
+  labs(title = "Democrat animosity predictors",
+       x = "", y = "LASSO coefficient", fill = "") +
+  theme_minimal()
+
+p2 <- bind_rows(rep_full, rep_partisan) %>%
+  ggplot(aes(x = reorder(term, coef), y = coef, fill = sample)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("tomato", "tomato4")) +
+  labs(title = "Republican animosity predictors",
+       x = "", y = "LASSO coefficient", fill = "") +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2)
+ggsave("data/viz_robustness_partisan.png",
+       arrangeGrob(p1, p2, ncol = 2),
+       width = 12, height = 6, dpi = 300)
+
+```
+
+
+## Robustness check 2 - alternate outcome variable (CSES)
+
+```{r}
+make_comparison_plot <- function(df1, df2, title, colors) {
+  bind_rows(df1, df2) %>%
+    ggplot(aes(x = reorder(term, coef), y = coef, fill = dv)) +
+    geom_col(position = "dodge") +
+    coord_flip() +
+    scale_fill_manual(values = colors) +
+    labs(title = title, x = "", y = "LASSO coefficient", fill = "DV") +
+    theme_minimal(base_size = 10)
+}
+
+dem_therm_1 <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+dem_cses_1 <- robust_results[["R3_dem_cses"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+dem_therm_5 <- all_results[["1c_dem_skip"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+dem_cses_5 <- robust_results[["R3_dem_cses"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+rep_therm_1 <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+rep_cses_1 <- robust_results[["R4_rep_cses"]]$coef_df %>%
+  filter(class == 1, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+rep_therm_5 <- all_results[["2c_rep_skip"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "Thermometer")
+
+rep_cses_5 <- robust_results[["R4_rep_cses"]]$coef_df %>%
+  filter(class == 5, !is_year) %>% arrange(desc(coef)) %>% head(10) %>%
+  mutate(dv = "CSES")
+
+p_da <- make_comparison_plot(dem_therm_1, dem_cses_1,
+                              "Dem animosity", c("steelblue", "steelblue4"))
+p_df <- make_comparison_plot(dem_therm_5, dem_cses_5,
+                              "Dem favorability", c("steelblue", "steelblue4"))
+p_ra <- make_comparison_plot(rep_therm_1, rep_cses_1,
+                              "Rep animosity", c("tomato", "tomato4"))
+p_rf <- make_comparison_plot(rep_therm_5, rep_cses_5,
+                              "Rep favorability", c("tomato", "tomato4"))
+
+grid.arrange(p_da, p_df, p_ra, p_rf, ncol = 2)
+ggsave("data/viz_robustness_cses.png",
+       arrangeGrob(p_da, p_df, p_ra, p_rf, ncol = 2),
+       width = 12, height = 10, dpi = 300)
+
+ggsave("data/viz_robustness_cses.png",
+       arrangeGrob(p_da, p_df, p_ra, p_rf, ncol = 2),
+       width = 12, height = 10, dpi = 300)
+
+```
 
 
