@@ -1,0 +1,283 @@
+---
+title: "Sections 1-5, 8, 10"
+author: "Wei Wang (David)"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, comment = ' ', fig.align = "left", fig.width = 7, fig.height = 5)
+pacman::p_load(tidyverse, ggplot2, patchwork)
+```
+
+### Title: Issues or traits? Understanding American partisan favorability and animosity through open-ended questions
+
+### Executive Summary
+
+- Democratic and Republican party supporters increasingly dislike each other, but reasons for this rising animosity has been under debate.
+
+- Over two studies, we investigate how the content of what Democrats and Republicans like and dislike about each party predict their favorability toward their own party and their animosity toward the other party. We further analyze the generalizability of our findings.
+
+- We use open-ended survey responses from five cross-sectional samples of the American National Election Studies (2008-24) to gauge party favorability content. 
+
+- We combine a skip-gram text mining approach with relaxed LASSO to analyze open-ended responses' predictiveness of party favorability. To analyze generalizability, we conduct relaxed LASSO using a range of demographic variables and political attitudes to predict non-response to the ANES open-ended survey questions.
+
+- We find that Americans primarily use issue-based words to explain why they like and dislike each party. Democrats and Republicans appear not to dislike each other personally simply because they support the opposite party. On the opposite, such dislike seems to stem from substantive policy disagreements.
+
+- Caution is needed when interpreting our findings, as we find substantial selection bias in the open-ended survey responses. Our findings skew toward people who are politically interested, highly educated, male, white, and partisan.
+
+### Motivation
+
+One need not be a keen observer of American politics to know that supporters of the Democratic and Republican parties increasingly dislike each other over the past 20 years. Increasingly, Americans seem to be unable to find common ground across partisan lines. This phenomenon of political polarization has led many to worry about a decline in American democracy, where people become less willing to find political compromise with members of the opposite party, less supportive of democratic norms, such as the independence of each of the three branches of government, and more likely to engage in political violence against out-party supporters. 
+
+Nevertheless, two competing accounts about *why* Americans dislike out-party supporters offer competing implications about how intractable political polarization is in the American public. One camp of political science scholars argue that Americans dislike members of the out-party simply because of their political identity. Scholars who term this affective polarization (e.g., Iyengar, Sood, and Lelkes, 2012) argue that increasingly, out-party animosity functions similarly as racism and religious discrimination, where people in competing social groups dislike each other automatically, even when they do not disagree on policy opinions. There appears to be plenty of empirical support for affective polarization. According to Iyengar and colleagues' analysis of survey data since the 1960s, Americans report being increasingly displeased if their children were to marry someone from another party. Over the same timespan, they have also become increasingly likely to rate supporters of their own party as intelligent, and supporters of the opposite party as selfish. This constitutes what we here call the **trait-based account** of American political polarization, where politics becomes personal and animosity is automatic.
+
+In contrast, the **issue-based account** takes the same evidence of increasing partisan dislike, and offers a competing argument. Americans care more about policy opinion disagreements than differences in partisan identity, this account argues, and mostly use partisanship to *infer* other people's substantive political issues positions (Orr and Huber, 2020). It just so happens that over the recent decades, the Democratic and Republican Party have moved further apart on their issue positions, such that you would be hard-pressed to find any pro-welfare Republican politicians or any anti-abortion Democratic politicians (Levendusky, 2009). In other words, a Democrat may still feel deeply troubled by their daughter marrying a Republican supporter, but not simply because he is a Republican *per se*, but because it is highly likely that the husband is anti-abortion. Under this account, political polarization becomes less normatively problematic. Party supporters debate one another vigorously based on substantive policies rather than social identities, which is a natural part of how democracies resolve disagreements.
+
+In the current project, we attempt to offer some descriptive evidence to arbitrate between these two competing accounts of American political polarization. We achieve this by analyzing why Americans *say* they like and dislike the Democratic and Republican party. Through examining the content of Americans' self-reported out-party animosity and in-party favorability, we hope to understand whether issues or traits predominantly predict whether Americans like or dislike each party.
+
+### Data Description
+
+We utilize closed-ended and open-ended survey responses from the American National Election Studies (ANES), one of the definitive data sources for American politics analysts. The data set has several benefits for our analysis. One, it has a large sample size ranging from 2,300 to 8,400 in our years of interest. Personally collecting such a large sample would have been unrealistically costly for us. Thankfully, ANES has made most of its data freely available for research purposes. Two, ANES applies probabilistic sampling for each year that it fields its survey. Since we hope to make population-level inferences about Americans in general, a probabilistic sample gives us the inferential power as each American resident theoretically has equal probability of being contacted by the survey administrators. Third, and most importantly for our purposes, ANES asks many questions about political attitudes and demographics in the exact same way over many consecutive waves. This consistency in question wording allows us to pool and compare data from different years. In contrast, any survey question that measures the same concept but words the question differently, raises the concern that such wording changes may systematically alter responses.
+
+Specifically, we used the fresh cross-sectional pre-election samples from 2008 to 2024 for our analysis, resulting in a pooled sample size of N=26,307. These combine surveys conducted in both face-to-face and online formats. ANES surveys are generally fielded on election years. Thus, this gave us five years of data (2008, 12, 16, 20, 24) that traced as far back as the start of the first Obama administration, when political polarization was high but in no way comparable to today's levels. The year 2008 was set as our starting year because this was the first year in which ANES made its open-ended survey response data publicly available.
+
+Our main outcome of interest is the feeling thermometer scale for the Democratic and the Republican party, a common measure in American politics literature for partisan favorability and animosity. Respondents were instructed to rate how warmly they feel about each party on a 0-100 scale. To quote from the ANES codebook, "Ratings between 50 degrees-100 degrees mean that you feel favorably and warm toward the group; ratings between 0 and 50 degrees mean that you don’t feel favorably towards the group and that you don’t care too much for that group. If you don’t feel particularly warm or cold toward a group you would rate them at 50 degrees." 
+
+Our main predictors are extracted from open-ended responses to four questions: "What is it that you like [dislike] about the Democratic [Republican] party?" This question follows an earlier binary response question asking, "Is there anything that you like [dislike] about the Democratic [Republican] party?" Respondents who replied "No" would not have reached the open-ended question. As selection bias in open-ended survey responses is a known issue in public opinion research, we included this binary variable to analyze predictors of non-response to our open-ended questions. 
+
+To further probe selection bias, we included a range of multiple-choice demographic variables and political attitude questions also available in the ANES data we selected. Our variable selection criteria were that 1) each variable must have been measured in all five waves of our data set, and 2) each variable must plausibly be substantive relevant for our research question. A description of each of these closed-ended, multiple-choice variables can be found in `anes_timeseries_cdf_codebook_Varlist.pdf`, where we highlighted all variables we selected. 
+
+Two other data pre-processing steps are worth noting here, should the reader wish to analyze ANES data in the future. First, data merging requires extra caution. ANES stored its open-ended data files in separate spreadsheets from each year's main data file, as well as from what it calls the cumulative data file, which compiles all the closed-ended, multiple-choice responses. Merging the closed- and open-ended data sets require matching on the respondent ID numbers. However, in some cases, errors in survey administration makes this process difficult. In particular, in 2016, every respondent in the main data file was given a second set of response IDs for unclear reasons, whereas the open-ended data file included only the original, first set of response IDs. This thus requires creating a mapping and matching function of the two sets of response IDs in preparation for merging. Second, NA's were coded in diverse ways -- as 98 or 99 for some variables, -7 or -9 for others, 'Inapplicable' for some others, and simply NA for still others. Because certain variables take values such as 98 or 99 as valid responses (ex. the 0-100 continuous feeling thermometer measures), extra care is required when coding for NA. The only way to properly recode the NAs was by referencing the codebook for each included variable's coding schemes. Because we included a total of 37 closed-ended variables, here we used Claude Code to help us scrape the codebook and write the recoding script to accelerate the process.
+
+### Exploratory Data Analysis
+
+In this section, we describe three features of our data: 1) sample composition by year, 2) how feeling thermometer values, our main outcome, has changed from 2008 to 2024, and 3) non-response distributions.
+
+#### Sample composition by year
+
+One concern with analyzing any pooled data collected from different times is that time-variant variables may affect statistical inference. This concern is justified with our present data set. As the left-hand-side figure below shows, sample size varies widely by year. Pooling the data without accounting for time-variant sample size changes may effectively overweight years that happened to have a larger sample size (ex. 2020). Additionally, as the right-hand-side figure below shows, the partisan composition of each year's sample has changed considerably over time, where there was a declining proportion of Democrats and independents, and a rising proportion of Republicans and lean Republicans. It is hard to disentangle whether such year-to-year differences are due to changes in survey administration methods, changes in the American electorate in the real world, or some combination of both. Nevertheless, the presence of these idiosyncrasies from year to year motivates us to use year fixed effects for all our statistical models in subsequent analyses.
+
+```{r}
+# load data
+data <- read_csv('data/data.csv')
+```
+
+```{r rawcount}
+# plot raw sample size count by year and partisanship
+data_pid7_count <- data %>%
+  filter(!is.na(pid7)) %>%
+  mutate(party = case_when(
+    pid7 %in% 1:2 ~ 'Democrat',
+    pid7 == 3 ~ 'Lean Democrat',
+    pid7 == 4 ~ 'Independent',
+    pid7 == 5 ~ 'Lean Republican',
+    pid7 %in% 6:7 ~ 'Republican'
+  )) %>%
+  mutate(party = factor(party, levels = c(
+    'Democrat', 'Lean Democrat', 'Independent', 'Lean Republican', 'Republican'))) %>%
+  count(year, party)
+plot_pid7_count <- data_pid7_count %>%
+  ggplot(aes(x = factor(year), y = n, fill = party)) + 
+  geom_col() +
+  scale_fill_manual(values = c('Democrat' = '#2166ac',
+                               'Lean Democrat' = '#5b9bd5',
+                               'Independent' = 'gray60',
+                               'Lean Republican' = '#d97862',
+                               'Republican' = '#b2182b')) +
+  labs(
+    x = 'Year',
+    y = 'Count',
+    title = 'Sample size by year and partisanship',
+    fill = 'Partisanship'
+  ) +
+  theme_minimal()
+
+ggsave('outputs/fig_eda_rawcount.png', plot_pid7_count, width = 7, height = 4.5, dpi = 300)
+```
+
+```{r proportions}
+data_pid7_prop <- data_pid7_count %>%
+  group_by(year) %>%
+  mutate(prop = n/sum(n)) %>%
+  ungroup()
+
+plot_pid7_prop <- data_pid7_prop %>%
+  ggplot(aes(x = factor(year), y = prop, fill = party)) + 
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c('Democrat' = '#2166ac',
+                               'Lean Democrat' = '#5b9bd5',
+                               'Independent' = 'gray60',
+                               'Lean Republican' = '#d97862',
+                               'Republican' = '#b2182b')) +
+  labs(
+    x = 'Year',
+    y = 'Percentage',
+    title = 'Partisanship distributions by year',
+    fill = 'Partisanship'
+  ) +
+  theme_minimal()
+
+ggsave('outputs/fig_eda_props.png', plot_pid7_prop, width = 7, height = 4.5, dpi = 300)
+
+# display side-by-side
+(plot_pid7_count + plot_pid7_prop) +
+  plot_layout(guides = 'collect') &
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.position = 'bottom') &
+  theme(legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, 'cm'))
+```
+
+#### Feeling thermometer ratings, 08-24
+
+Out-party feeling thermometer results largely correspond to what is identified in prior literature. From 2008 to 2024, Americans increasingly dislike the out-party (left-hand-side), while in-party feelings have remained steady. 
+
+```{r thermometer}
+# function for calculating weighted means
+func_therm_mean <- function(df, therm_var, subsam_label, filter_expr) {
+  df %>%
+    filter(!is.na(.data[[therm_var]]), !is.na(weight), {{ filter_expr }}) %>%
+    group_by(year) %>%
+    summarise(mean_therm = weighted.mean(.data[[therm_var]], weight), .groups = 'drop') %>%
+    mutate(group = subsam_label)
+}
+
+# function for creating dataframe for plotting
+therm_summary <- function(df, therm_var) {
+  bind_rows(
+    func_therm_mean(df, therm_var, 'Full sample', TRUE),
+    func_therm_mean(df, therm_var, 'Democrats',   pid7 %in% 1:3),
+    func_therm_mean(df, therm_var, 'Independents', pid7 == 4),
+    func_therm_mean(df, therm_var, 'Republicans', pid7 %in% 5:7)
+  ) %>%
+    mutate(group = factor(group, levels = c('Full sample', 'Democrats', 'Independents', 'Republicans')))
+}
+
+# outparty thermometer only
+plot_outparty <- bind_rows(
+  func_therm_mean(data, 'rep_therm', 'Democrats -> GOP', pid7 %in% 1:3),
+  func_therm_mean(data, 'dem_therm', 'Republicans -> DEM', pid7 %in% 5:7)
+) %>%
+  mutate(group = factor(group, levels = c('Democrats -> GOP',
+                                           'Republicans -> DEM'))) %>%
+  ggplot(aes(x = year, y = mean_therm, color = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c('Democrats -> GOP' = '#2166ac',
+                                 'Republicans -> DEM' = '#b2182b')) +
+  scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(title = 'Out-party feeling thermometer',
+       x = 'Year',
+       y = 'Mean thermometer rating \n (0-49 = Cold; 51-100 = Warm)',
+       color = 'Subsample') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = 'bottom')
+
+ggsave('outputs/fig_eda_outparty_therm.png', plot_outparty, width = 7, height = 4.5, dpi = 300)
+
+# inparty thermometer only
+plot_inparty <- bind_rows(
+  func_therm_mean(data, 'dem_therm', 'Democrats -> DEM', pid7 %in% 1:3),
+  func_therm_mean(data, 'rep_therm', 'Republicans -> GOP', pid7 %in% 5:7)
+) %>%
+  mutate(group = factor(group, levels = c('Democrats -> DEM',
+                                           'Republicans -> GOP'))) %>%
+  ggplot(aes(x = year, y = mean_therm, color = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c('Democrats -> DEM' = '#2166ac',
+                                 'Republicans -> GOP' = '#b2182b')) +
+  scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(title = 'In-party feeling thermometer',
+       x = 'Year',
+       y = 'Mean thermometer rating \n (0-49 = Cold; 51-100 = Warm)',
+       color = 'Subsample') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = 'bottom')
+
+ggsave('outputs/fig_eda_inparty_therm.png', plot_inparty, width = 7, height = 4.5, dpi = 300)
+
+# display side-by-side
+(plot_outparty + (plot_inparty + labs(color = NULL))) &
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.position = 'bottom',
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, 'cm'))
+```
+
+Examining the full sample, feelings for the Democratic party has declined over time, driven mostly by Republican and independents' animosity. Additionally, feelings for the Republican party has remained steady, such that Democrats' and independents' decreasing warmth is canceled out by Republicans' increasing warmth toward their own party.
+
+```{r therm full sample}
+
+# plotting function
+therm_plot <- function(df, therm_var, title) {
+  therm_summary(df, therm_var) |>
+    ggplot(aes(x = year, y = mean_therm, color = group)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c('Full sample' = 'gray10',
+                                  'Democrats'   = '#2166ac',
+                                  'Independents' = 'gray60',
+                                  'Republicans' = '#b2182b')) +
+    scale_x_continuous(breaks = c(2008, 2012, 2016, 2020, 2024)) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+    labs(title = title, 
+         x = 'Year', 
+         y = 'Mean thermometer rating \n (0-49 = Cold; 51-100 = Warm)', 
+         color = 'Subsample') +
+    theme_minimal()
+}
+
+plot_demtherm <- therm_plot(data, 'dem_therm', 'Feeling thermometer for the \n Democratic Party')
+plot_reptherm <- therm_plot(data, 'rep_therm', 'Feeling thermometer for the \n Republican Party')
+
+ggsave('outputs/fig_eda_demtherm.png', plot_demtherm, width = 7, height = 4.5, dpi = 300)
+ggsave('outputs/fig_eda_reptherm.png', plot_reptherm, width = 7, height = 4.5, dpi = 300)
+
+# display side-by-side
+(plot_demtherm + plot_reptherm) +
+  plot_layout(guides = 'collect') &
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.position = 'bottom',
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, 'cm'))
+```
+
+#### Distribution of nonresponses 
+
+Depending on the question asked, 40-60% of the sample was not included in our analysis. Most respondents did not respond because they did not reach the open-ended question, because they indicated they did not have anything they liked or disliked about either party. However, we also identified two other sources of non-response. Some did not respond to the parent binary question in the first place. Others reached the open-ended question but did not give a valid response.
+
+The significant non-response rate motivated us to analyze our selection bias. In Study 2 of our main analysis, as will be elaborated on subsequently, we analyze what demographics and political attitudes predict non-response to the open-ended questions.
+
+[PLEASE INSERT HERE REHAN'S FIGURE FOR THE SLIDES!!!]
+
+### Discussion and Conclusion
+
+Across two studies, we find that Americans mainly rationalize their likes and dislikes for the Democratic and Republican party in issue-based terms. We find little evidence of trait-based rationalization of partisan favorability or animosity. Though our analysis is only a descriptive, face-value analysis of our text mining results, our findings suggest American political polarization may be less affect-driven and more substantive ideology- or issue-driven than many scholars and commentators suppose.
+
+We also found that Americans describe their in-party in predominantly concrete, policy-specific terms (such as "climate" and "abortion"), while describing their out-party in more abstract, value-oriented terms (such as "socialist" and "racist"). This may suggest that partisans have less knowledge about out-partisans' substantive policy opinions than their in-party. In other words, they use partisanship labels as cues such that while they understand out-partisans have very different issue positions from themselves, they are not necessarily able to bring top-of-mind the specific policy disagreements without prompting. In contrast, it appears in-party favorability *is* driven substantive alignment with the party on specific policy issues.
+
+Finally, we caution our findings by highlighting that our effective sample is biased toward people who are politically interested, highly educated, male, white, and partisan, as Study 2 shows. Our findings here also points to a long-standing criticism of using open-ended survey responses to assess public opinion. In particular, people who are less educated tend to give less information-rich and less articulate responses. However, this is not necessarily equal to them having no opinion, and can be simply an artifact of the open-ended survey format.
+
+The biggest limitation of the current project is a lack of detailed conceptualization and operationalization of what counts as issue-based or trait-based partisan favorability. In future work, we would like to extend on our present analysis by constructing or utilizing a theory-driven codebook, such that the two types of favorability are more clearly delineated. In addition, we will manually code a small subset of training data from the raw open-ended responses and use large-language models to code the rest of our effective sample. Given that this method of coding would even-better account for contextual dependencies than skip-grams, we expect our findings to be better interpretable. Fundamentally, however, deeper exploration of the topic of causes of partisan favorability and animosity requires a deeper literature search of how trait-based and issue-based partisan stereotypes differ.
+
+### Appendices
+
+
+### Statement on AI Use
+
+
+
+### References
+
+Iyengar, S., Sood, G., & Lelkes, Y. (2012). Affect, Not Ideology: A Social Identity Perspective on Polarization. Public Opinion Quarterly, 76(3), 405–431. https://doi.org/10.1093/poq/nfs038
+
+Levendusky, M. (2009). The Partisan Sort: How Liberals Became Democrats and Conservatives Became Republicans. University of Chicago Press. http://ebookcentral.proquest.com/lib/upenn-ebooks/detail.action?docID=471886
+
+Orr, L. V., & Huber, G. A. (2020). The Policy Basis of Measured Partisan Animosity in the United States. American Journal of Political Science, 64(3), 569–586. https://doi.org/10.1111/ajps.12498
